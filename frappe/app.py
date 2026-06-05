@@ -40,8 +40,9 @@ import gettext
 
 import babel
 import babel.messages
-import nh3
-import num2words
+
+# import nh3
+# import num2words
 import pydantic
 
 import frappe.boot

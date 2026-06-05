@@ -19,12 +19,14 @@ from collections.abc import (
 )
 from email.header import decode_header, make_header
 from email.utils import formataddr, getaddresses, parseaddr
-from typing import Any, Generic, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Any, Generic, TypeAlias, TypedDict
 
 import orjson
-from werkzeug.test import Client
 
 from frappe.deprecation_dumpster import gzip_compress, gzip_decompress, make_esc
+
+if TYPE_CHECKING:  # pragma: no cover
+	from werkzeug.test import Client
 
 # utility functions like cint, int, flt, etc.
 from frappe.utils.data import *
@@ -609,8 +611,10 @@ def touch_file(path):
 	return path
 
 
-def get_test_client(use_cookies=True) -> Client:
+def get_test_client(use_cookies=True) -> "Client":
 	"""Return an test instance of the Frappe WSGI."""
+	from werkzeug.test import Client
+
 	from frappe.app import application
 
 	return Client(application, use_cookies=use_cookies)

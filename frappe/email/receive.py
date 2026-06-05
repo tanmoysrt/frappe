@@ -15,7 +15,6 @@ from email.errors import HeaderParseError
 from email.header import decode_header
 from urllib.parse import unquote
 
-import chardet
 from email_reply_parser import EmailReplyParser
 
 import frappe
@@ -187,7 +186,7 @@ class EmailServer:
 		for i, uid in enumerate(email_list[:100]):
 			try:
 				self.retrieve_message(uid, i + 1, folder)
-			except (_socket.timeout, LoginLimitExceeded):
+			except _socket.timeout, LoginLimitExceeded:
 				# get whatever messages were retrieved
 				break
 
@@ -560,7 +559,12 @@ class Email:
 			self.html_content += markdown(text_content)
 
 	def get_charset(self, part):
-		return part.get_content_charset() or chardet.detect(safe_encode(cstr(part)))["encoding"]
+		if charset := part.get_content_charset():
+			return charset
+
+		import chardet
+
+		return chardet.detect(safe_encode(cstr(part)))["encoding"]
 
 	def get_payload(self, part):
 		charset = self.get_charset(part)

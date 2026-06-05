@@ -1,7 +1,7 @@
 import json
 import re
+from html.parser import HTMLParser
 
-import nh3
 from bleach_allowlist import bleach_allowlist
 
 import frappe
@@ -21,9 +21,44 @@ EMOJI_PATTERN = re.compile(
 REMOVE_CONTENT_TAGS = {"script", "style"}
 
 
+class _TagFound(Exception):
+	pass
+
+
+class _TagDetector(HTMLParser):
+	"""Detect presence of any HTML tag without building a parse tree.
+
+	Uses the same tokenizer as BeautifulSoup's "html.parser" builder, which creates
+	a Tag exactly on these two events - so this matches
+	`bool(BeautifulSoup(text, "html.parser").find())` without importing bs4.
+	"""
+
+	def handle_starttag(self, tag, attrs):
+		raise _TagFound
+
+	def handle_startendtag(self, tag, attrs):
+		raise _TagFound
+
+
+def has_html_tags(text: str) -> bool:
+	"""Return True if text contains any HTML tag."""
+	detector = _TagDetector()
+	try:
+		detector.feed(text)
+		detector.close()
+	except _TagFound:
+		return True
+	except Exception:
+		# unparseable input: err on the side of treating it as HTML
+		return True
+	return False
+
+
 def clean_html(html):
 	if not isinstance(html, str):
 		return html
+
+	import nh3
 
 	return nh3.clean(
 		html,
@@ -54,6 +89,8 @@ def clean_html(html):
 def clean_email_html(html):
 	if not isinstance(html, str):
 		return html
+
+	import nh3
 
 	allowed_css_properties = {
 		"color",
@@ -150,16 +187,17 @@ def sanitize_html(html, linkify=False, always_sanitize=False, disallowed_tags=No
 
 	Does not sanitize JSON unless explicitly specified, as it could lead to future problems
 	"""
-	from bs4 import BeautifulSoup
 
 	if not isinstance(html, str):
 		return html
+
+	import nh3
 
 	if not always_sanitize:
 		if is_json(html):
 			return html
 
-		if not bool(BeautifulSoup(html, "html.parser").find()):
+		if not has_html_tags(html):
 			return html
 
 	tags = (

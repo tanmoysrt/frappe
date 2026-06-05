@@ -17,7 +17,6 @@ from frappe.core.doctype.server_script.server_script_utils import get_server_scr
 from frappe.monitor import add_data_to_monitor
 from frappe.permissions import check_doctype_permission
 from frappe.utils import cint, get_files_path
-from frappe.utils.csvutils import build_csv_response
 from frappe.utils.deprecations import deprecated
 from frappe.utils.image import optimize_image
 from frappe.utils.response import build_response
@@ -341,6 +340,8 @@ def run_doc_method(method, docs=None, dt=None, dn=None, arg=None, args=None):
 
 	# build output as csv
 	if cint(frappe.form_dict.get("as_csv")):
+		from frappe.utils.csvutils import build_csv_response
+
 		build_csv_response(response, _(doc.doctype).replace(" ", ""))
 		return
 

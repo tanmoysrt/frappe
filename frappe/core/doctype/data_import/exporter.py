@@ -6,8 +6,6 @@ from frappe import _
 from frappe.model import display_fieldtypes, no_value_fields
 from frappe.model import table_fields as table_fieldtypes
 from frappe.utils import flt, format_duration, groupby_metric
-from frappe.utils.csvutils import build_csv_response
-from frappe.utils.xlsxutils import build_xlsx_response, get_default_xlsx_styles
 
 
 class Exporter:
@@ -251,8 +249,12 @@ class Exporter:
 
 	def build_response(self):
 		if self.file_type == "CSV":
+			from frappe.utils.csvutils import build_csv_response
+
 			build_csv_response(self.get_csv_array_for_export(), _(self.doctype))
 		elif self.file_type == "Excel":
+			from frappe.utils.xlsxutils import build_xlsx_response, get_default_xlsx_styles
+
 			data = self.get_csv_array_for_export()
 			styles = get_default_xlsx_styles(
 				columns=self.fields,

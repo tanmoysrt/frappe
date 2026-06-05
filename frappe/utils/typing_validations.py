@@ -1,10 +1,10 @@
 import inspect
+import sys
 from collections.abc import Callable
 from functools import lru_cache, wraps
 from inspect import _empty, isclass
 from types import EllipsisType
 from typing import ForwardRef, TypeVar, Union
-from unittest import mock
 
 from pydantic import ConfigDict, PydanticUserError
 from pydantic import TypeAdapter as PydanticTypeAdapter
@@ -157,8 +157,9 @@ def transform_parameter_types(func: Callable, args: tuple, kwargs: dict, force_t
 			continue
 		elif any(isinstance(x, ForwardRefOrStr) for x in getattr(current_arg_type, "__args__", [])):
 			continue
-		# ignore unittest.mock objects
-		elif isinstance(current_arg_value, mock.Mock):
+		# ignore unittest.mock objects; a Mock can only exist if unittest.mock
+		# is already imported, so look it up in sys.modules instead of importing it
+		elif (mock := sys.modules.get("unittest.mock")) and isinstance(current_arg_value, mock.Mock):
 			continue
 
 		# allow slack for Frappe types

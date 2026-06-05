@@ -2,8 +2,6 @@
 # For license information, please see license.txt
 
 
-import requests
-
 import frappe
 from frappe.model.document import Document
 from frappe.utils.caching import redis_cache
@@ -90,6 +88,8 @@ def _app_title(app_name):
 
 def get_feed(since):
 	"""'What's New' feed implementation for Frappe"""
+	import requests
+
 	r = requests.get(f"https://frappe.io/api/method/changelog_feed?since={since}")
 	r.raise_for_status()
 	return r.json()["message"]

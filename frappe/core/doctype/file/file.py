@@ -28,7 +28,6 @@ from frappe.utils import (
 from frappe.utils.file_manager import is_safe_path
 from frappe.utils.html_utils import escape_html
 from frappe.utils.image import optimize_image, strip_exif_data
-from frappe.utils.pdf import pdf_contains_js
 
 from .exceptions import (
 	AttachmentLimitReached,
@@ -472,8 +471,11 @@ class File(Document):
 			)
 
 	def check_content(self):
-		if self.file_type == "PDF" and self._content and pdf_contains_js(self._content):
-			frappe.throw(_("This PDF cannot be uploaded as it contains unsafe content."))
+		if self.file_type == "PDF" and self._content:
+			from frappe.utils.pdf import pdf_contains_js
+
+			if pdf_contains_js(self._content):
+				frappe.throw(_("This PDF cannot be uploaded as it contains unsafe content."))
 
 	def validate_duplicate_entry(self):
 		if not self.flags.ignore_duplicate_entry_error and not self.is_folder:
@@ -545,7 +547,7 @@ class File(Document):
 				image, filename, extn = get_local_image(self.file_url)
 			else:
 				image, filename, extn = get_web_image(self.file_url)
-		except (HTTPError, SSLError, OSError, TypeError):
+		except HTTPError, SSLError, OSError, TypeError:
 			return
 
 		size = width, height
@@ -974,7 +976,7 @@ def has_permission(doc, ptype=None, user=None, debug=False):
 
 		try:
 			ref_doc = frappe.get_doc(attached_to_doctype, attached_to_name)
-		except (ModuleNotFoundError, ImportError):
+		except ModuleNotFoundError, ImportError:
 			return False
 		except frappe.DoesNotExistError:
 			frappe.clear_last_message()

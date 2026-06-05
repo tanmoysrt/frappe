@@ -3,7 +3,6 @@
 
 import os
 
-from bs4 import BeautifulSoup
 from whoosh.fields import ID, TEXT, Schema
 
 import frappe
@@ -60,6 +59,8 @@ class WebsiteSearch(FullTextSearch):
 		frappe.local.no_cache = True
 
 		try:
+			from bs4 import BeautifulSoup
+
 			set_request(method="GET", path=route)
 			content = get_response_content(route)
 			soup = BeautifulSoup(content, "html.parser")
@@ -86,6 +87,8 @@ class WebsiteSearch(FullTextSearch):
 
 
 def slugs_with_web_view(_items_to_index):
+	from bs4 import BeautifulSoup
+
 	all_routes = []
 	filters = {"has_web_view": 1, "allow_guest_to_view": 1, "index_web_pages_for_search": 1}
 	fields = ["name", "is_published_field", "website_search_field"]

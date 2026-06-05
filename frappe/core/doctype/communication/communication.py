@@ -5,8 +5,6 @@ from collections import Counter
 from email.utils import getaddresses
 from urllib.parse import unquote_plus
 
-from bs4 import BeautifulSoup
-
 import frappe
 from frappe import _
 from frappe.automation.doctype.assignment_rule.assignment_rule import (
@@ -202,6 +200,8 @@ class Communication(Document, CommunicationEmailMixin):
 		"""Set sender's User.email_signature or default outgoing's EmailAccount.signature to the email"""
 		if not self.content:
 			return
+
+		from bs4 import BeautifulSoup
 
 		soup = BeautifulSoup(self.content, "html.parser")
 		email_body = soup.find("div", {"class": "ql-editor read-mode"})

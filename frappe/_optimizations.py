@@ -32,6 +32,59 @@ def optimize_all():
 	optimize_for_gil_contention()
 
 
+def optimize_werkzeug_import():
+	"""Avoid executing werkzeug/__init__.py when only submodules are needed.
+
+	werkzeug's __init__ eagerly imports `serving`, `test` and `wrappers`, which in turn
+	pull in heavy stdlib modules (ssl, email, socketserver, ...) costing ~2 MB per
+	process even when only `werkzeug.datastructures` is required (e.g. background
+	workers that never serve HTTP).
+
+	This pre-seeds `sys.modules["werkzeug"]` with the package module *without*
+	executing its __init__. Submodule imports (`from werkzeug.wrappers import ...`)
+	work as usual via the package's __path__. Top-level attribute access
+	(`from werkzeug import Response`) is handled by a PEP 562 module __getattr__
+	that lazily executes the real __init__ once, preserving full compatibility.
+
+	Note: This function must run *before* anything imports werkzeug; it's a no-op
+	otherwise.
+	"""
+	import importlib
+	import importlib.util
+
+	if "werkzeug" in sys.modules:
+		return
+
+	spec = importlib.util.find_spec("werkzeug")
+	if spec is None or spec.loader is None:  # pragma: no cover
+		return
+
+	module = importlib.util.module_from_spec(spec)
+	executed = False
+
+	def __getattr__(name):
+		nonlocal executed
+		# `from werkzeug import exceptions`-style submodule access (also used by
+		# werkzeug internally via `from .. import x`): import just the submodule.
+		if not name.startswith("_"):
+			try:
+				return importlib.import_module(f"werkzeug.{name}")
+			except ImportError:
+				pass
+		# A real top-level attribute (Request, Response, Client, run_simple):
+		# execute the real werkzeug/__init__.py once.
+		if not executed:
+			executed = True
+			spec.loader.exec_module(module)
+		try:
+			return module.__dict__[name]
+		except KeyError:
+			raise AttributeError(f"module 'werkzeug' has no attribute {name!r}") from None
+
+	module.__getattr__ = __getattr__
+	sys.modules["werkzeug"] = module
+
+
 def optimize_gc_parameters():
 	from frappe.utils import sbool
 

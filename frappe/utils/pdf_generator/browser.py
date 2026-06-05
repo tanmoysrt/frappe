@@ -1,11 +1,12 @@
-from typing import ClassVar
-
-from bs4 import BeautifulSoup
+from typing import TYPE_CHECKING, ClassVar
 
 import frappe
 from frappe.utils.data import cint
 from frappe.utils.pdf import get_host_url
 from frappe.utils.print_utils import convert_uom, parse_float_and_unit
+
+if TYPE_CHECKING:
+	from bs4 import BeautifulSoup
 
 
 class Browser:
@@ -85,6 +86,8 @@ class Browser:
 		self.browser_context_id = result["browserContextId"]
 
 	def set_html(self, html):
+		from bs4 import BeautifulSoup
+
 		self.soup = BeautifulSoup(html, "html5lib")
 
 	def set_options(self, options):
@@ -215,7 +218,7 @@ class Browser:
 	def _parse_pdf_options_from_html(self):
 		from frappe.utils.pdf import get_print_format_styles
 
-		soup: BeautifulSoup = self.soup
+		soup: "BeautifulSoup" = self.soup
 		options = {}
 		print_format_css = get_print_format_styles(soup)
 		attrs = (

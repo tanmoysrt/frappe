@@ -1,16 +1,18 @@
 import math
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
-
-import requests
 
 import frappe
 from frappe import _
 from frappe.frappeclient import FrappeClient, FrappeOAuth2Client
 from frappe.utils import convert_utc_to_system_timezone, get_datetime, get_system_timezone
+
+if TYPE_CHECKING:
+	from requests import Response
+
 
 CHUNK_SIZE = 5 * 1024 * 1024  # 5MB
 
@@ -161,14 +163,16 @@ def add_or_update_tzinfo(date_time: datetime | str, timezone: str | None = None)
 	return str(date_time)
 
 
-def raise_for_status(response: requests.Response) -> None:
+def raise_for_status(response: Response) -> None:
 	"""Raises an HTTPError if the response status code indicates an error."""
 
 	if not response.ok:
+		from requests.exceptions import HTTPError
+
 		try:
 			error_text = response.json()
 		except Exception:
 			error_text = response.text.strip()
 
 		message = _("Error {0}: {1}").format(response.status_code, error_text)
-		raise requests.exceptions.HTTPError(message, response=response)
+		raise HTTPError(message, response=response)

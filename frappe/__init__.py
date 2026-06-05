@@ -24,6 +24,12 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, Optional, TypeAlias, Union
 
+import frappe._optimizations
+
+# Avoid executing werkzeug's heavy __init__ (serving, test, wrappers) when only
+# submodules are used. Must run before any werkzeug import.
+frappe._optimizations.optimize_werkzeug_import()
+
 import orjson
 from werkzeug.datastructures import Headers
 

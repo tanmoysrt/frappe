@@ -5,7 +5,7 @@ import datetime
 import json
 import os
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import frappe
 import frappe.desk.reportview
@@ -19,7 +19,9 @@ from frappe.monitor import add_data_to_monitor
 from frappe.permissions import get_role_permissions, get_roles, has_permission
 from frappe.utils import cint, cstr, flt, format_datetime, format_duration, formatdate, get_html_format, sbool
 from frappe.utils.caching import request_cache
-from frappe.utils.xlsxutils import XLSXMetadata, XLSXStyleBuilder, handle_html, make_xlsx
+
+if TYPE_CHECKING:
+	from frappe.utils.xlsxutils import XLSXMetadata
 
 
 def get_report_doc(report_name):
@@ -409,6 +411,8 @@ def _export_query(form_params, csv_params, populate_response=True):
 		)
 		return
 
+	from frappe.utils.xlsxutils import handle_html, make_xlsx
+
 	has_total_row = cint(data.get("add_total_row"))
 	needs_visible_filtering = (
 		visible_idx
@@ -538,6 +542,8 @@ def build_xlsx_data(
 			- column_widths: List of column widths for the Excel sheet
 			- styles: Dictionary of styles for Excel formatting (if applicable)
 	"""
+	from frappe.utils.xlsxutils import XLSXMetadata
+
 	metadata = None
 
 	EXCEL_TYPES = (
@@ -680,6 +686,8 @@ def get_xlsx_styles(metadata: XLSXMetadata, report_name: str | None = None) -> d
 		styles = report.get_xlsx_styles_from_module(metadata)
 
 	if not styles:
+		from frappe.utils.xlsxutils import XLSXStyleBuilder
+
 		styles = XLSXStyleBuilder(metadata).result
 
 	return styles

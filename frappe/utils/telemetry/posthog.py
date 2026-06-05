@@ -1,10 +1,11 @@
 from contextlib import suppress
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import frappe
-from frappe.utils.caching import site_cache
 
-from posthog import Posthog  # isort: skip
+if TYPE_CHECKING:
+	from posthog import Posthog
 
 POSTHOG_PROJECT_FIELD = "posthog_project_id"
 POSTHOG_HOST_FIELD = "posthog_host"
@@ -39,6 +40,8 @@ def init_telemetry():
 
 @lru_cache
 def _get_posthog_instance(project_id, host):
+	from posthog import Posthog
+
 	return Posthog(project_id, host=host, timeout=5, max_retries=3)
 
 

@@ -5,26 +5,19 @@ removed without any warning.
 """
 
 import frappe
-from frappe.utils import getdate
 from frappe.utils.caching import site_cache
-
-# posthog provider
-from .posthog import POSTHOG_HOST_FIELD, POSTHOG_PROJECT_FIELD
-from .posthog import capture as ph_capture
-from .posthog import capture_doc as _ph_capture_doc
-from .posthog import init_telemetry as _init_ph_telemetry
-from .posthog import is_enabled as is_posthog_enabled
-
-# pulse provider
-from .pulse.client import capture as pulse_capture
-from .pulse.client import is_enabled as is_pulse_enabled
 
 
 def add_bootinfo(bootinfo):
+	from .posthog import is_enabled as is_posthog_enabled
+	from .pulse.client import is_enabled as is_pulse_enabled
+
 	bootinfo.telemetry_site_age = site_age()
 	bootinfo.telemetry_provider = []
 
 	if is_posthog_enabled():
+		from .posthog import POSTHOG_HOST_FIELD, POSTHOG_PROJECT_FIELD
+
 		bootinfo.enable_telemetry = True
 		bootinfo.telemetry_provider.append("posthog")
 		bootinfo.posthog_host = frappe.conf.get(POSTHOG_HOST_FIELD)
@@ -36,6 +29,11 @@ def add_bootinfo(bootinfo):
 
 
 def capture(event, app, **kwargs):
+	from .posthog import capture as ph_capture
+	from .posthog import is_enabled as is_posthog_enabled
+	from .pulse.client import capture as pulse_capture
+	from .pulse.client import is_enabled as is_pulse_enabled
+
 	if is_posthog_enabled():
 		ph_capture(event, app, **kwargs)
 
@@ -45,6 +43,8 @@ def capture(event, app, **kwargs):
 
 @site_cache(ttl=60 * 60 * 12)
 def site_age():
+	from frappe.utils import getdate
+
 	try:
 		est_creation = frappe.db.get_value("User", "Administrator", "creation")
 		return (getdate() - getdate(est_creation)).days + 1
@@ -52,6 +52,14 @@ def site_age():
 		pass
 
 
-# for backward compatibility
-init_telemetry = _init_ph_telemetry
-capture_doc = _ph_capture_doc
+def __getattr__(name):
+	# for backward compatibility, avoids importing providers at module load
+	if name == "init_telemetry":
+		from .posthog import init_telemetry
+
+		return init_telemetry
+	if name == "capture_doc":
+		from .posthog import capture_doc
+
+		return capture_doc
+	raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
