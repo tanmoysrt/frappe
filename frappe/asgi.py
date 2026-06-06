@@ -28,6 +28,7 @@ from asgiref.sync import sync_to_async
 
 import frappe
 import frappe.app
+import frappe.dispatch
 
 # big uploads spill to disk past this, so buffering never pins RSS
 _SPOOL_MAX = 1024 * 1024
@@ -66,6 +67,9 @@ async def _lifespan(scope, receive, send):
 	while True:
 		message = await receive()
 		if message["type"] == "lifespan.startup":
+			# fail-fast guard (Phase 8): a sync frappe.db call on this thread
+			# would block the whole process — Database.sql raises instead
+			frappe.dispatch.register_loop_thread()
 			# later phases start queue workers / scheduler tick tasks here
 			await send({"type": "lifespan.startup.complete"})
 		elif message["type"] == "lifespan.shutdown":

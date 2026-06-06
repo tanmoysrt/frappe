@@ -17,6 +17,7 @@ worker thread pool, so the event loop never blocks on DB I/O.
 
 import asyncio
 import contextvars
+import threading
 
 from asgiref.sync import sync_to_async
 
@@ -124,11 +125,19 @@ class AsyncDatabaseFacade:
 	(``sync_to_async(thread_sensitive=False)``), so the event loop never
 	blocks; driver I/O still funnels through the bridge loop. Works for
 	every backend — async drivers and plain pymysql alike.
+
+	Calls are serialized per Database with a lock: a request has ONE
+	connection (transaction-per-request) and one cursor, and the wire
+	protocol is serial — two concurrent queries would interleave cursor
+	state. ``asyncio.gather`` over db.aio calls is therefore safe; the DB
+	ops just run one after another while truly independent awaitables
+	(HTTP, cache, sleep) still overlap.
 	"""
 
 	def __init__(self, db):
 		self._db = db
 		self._wrappers = {}
+		self._lock = threading.Lock()
 
 	def __getattr__(self, name):
 		if wrapper := self._wrappers.get(name):
@@ -136,6 +145,12 @@ class AsyncDatabaseFacade:
 		attr = getattr(self._db, name)
 		if not callable(attr):
 			return attr
-		wrapper = sync_to_async(attr, thread_sensitive=False)
+		lock = self._lock
+
+		def serialized(*args, **kwargs):
+			with lock:
+				return attr(*args, **kwargs)
+
+		wrapper = sync_to_async(serialized, thread_sensitive=False)
 		self._wrappers[name] = wrapper
 		return wrapper

@@ -168,8 +168,10 @@ select = [
     "UP",
     "B",
     "RUF",
+    "ASYNC", # blocking calls (sleep/requests/open/subprocess) inside async def stall the whole single process
 ]
 ignore = [
+    "ASYNC109", # async function with a timeout parameter - false-positives on wrappers forwarding driver timeouts (e.g. redis blpop)
     "B017", # assertRaises(Exception) - should be more specific
     "B018", # useless expression, not assigned to anything
     "B023", # function doesn't bind loop variable - will have last iteration's value

@@ -49,7 +49,7 @@ def is_async_callable(obj) -> bool:
 	# and not classes — type.__call__ is the constructor, never async)
 	if inspect.isroutine(obj) or isinstance(obj, type):
 		return False
-	call = getattr(type(obj), "__call__", None)
+	call = inspect.getattr_static(type(obj), "__call__", None)
 	return call is not None and inspect.iscoroutinefunction(inspect.unwrap(call))
 
 
@@ -95,6 +95,22 @@ def dispatch_sync(handler, *args, **kwargs):
 _bridge = {"loop": None, "pid": None}
 _bridge_lock = threading.Lock()
 
+# threads that run an event loop (uvicorn's, the bridge's). A sync DB call
+# on one of these blocks the WHOLE process, not one worker — Database.sql
+# checks this set and raises instead (Phase 8 fail-fast guard). Plain set:
+# adds are rare (one per loop thread), reads are a lock-free O(1) lookup.
+_loop_thread_ids = set()
+
+
+def register_loop_thread():
+	"""Mark the current thread as an event-loop thread."""
+	_loop_thread_ids.add(threading.get_ident())
+
+
+def on_loop_thread() -> bool:
+	"""True when called from a registered event-loop thread."""
+	return threading.get_ident() in _loop_thread_ids
+
 
 def get_bridge_loop() -> asyncio.AbstractEventLoop:
 	"""Return the process-wide bridge loop, starting it on first use.
@@ -107,11 +123,16 @@ def get_bridge_loop() -> asyncio.AbstractEventLoop:
 			if _bridge["loop"] is None or _bridge["pid"] != os.getpid():
 				loop = asyncio.new_event_loop()
 				threading.Thread(
-					target=loop.run_forever, name="frappe-bridge-loop", daemon=True
+					target=_run_bridge_loop, args=(loop,), name="frappe-bridge-loop", daemon=True
 				).start()
 				_bridge["loop"] = loop
 				_bridge["pid"] = os.getpid()
 	return _bridge["loop"]
+
+
+def _run_bridge_loop(loop):
+	register_loop_thread()
+	loop.run_forever()
 
 
 def run_coroutine_sync(coro):
