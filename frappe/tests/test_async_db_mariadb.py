@@ -118,6 +118,46 @@ class TestAsyncMariaDB(IntegrationTestCase):
 		self.assertEqual(desc, ["keep"])
 		self.db.rollback()  # leave no trace
 
+	def test_fork_safety(self):
+		"""RQ-worker shape: fork after pools exist. Child must get a fresh
+		registry and work; parent's conn must survive child GC of inherited
+		driver objects (the shared-epoll trap: child-side transport.close()
+		would epoll_ctl(DEL) the parent's reader subscription)."""
+		import subprocess
+		import sys
+		import textwrap
+
+		script = textwrap.dedent(f"""
+			import os, gc
+			import frappe
+			frappe.init({frappe.local.site!r})
+			frappe.connect()
+			assert frappe.db.get_value("User", "Administrator", "name") == "Administrator"
+			pid = os.fork()
+			if pid == 0:
+				frappe.local.db = None
+				gc.collect()  # worst case: child GCs every inherited driver object
+				frappe.connect()
+				assert frappe.db.get_value("User", "Guest", "name") == "Guest"
+				frappe.destroy()
+				os._exit(0)
+			_, status = os.waitpid(pid, 0)
+			assert os.waitstatus_to_exitcode(status) == 0, "child failed"
+			# the parent's connection must still be readable after the child dies
+			assert frappe.db.get_value("User", "Administrator", "name") == "Administrator"
+			frappe.destroy()
+			print("fork-ok")
+		""")
+		result = subprocess.run(
+			[sys.executable, "-c", script],
+			capture_output=True,
+			text=True,
+			timeout=60,
+			cwd=frappe.utils.get_bench_path() + "/sites",
+		)
+		self.assertEqual(result.returncode, 0, msg=result.stderr[-2000:])
+		self.assertIn("fork-ok", result.stdout)
+
 	def test_shutdown_pools_idempotent(self):
 		self.db.sql("SELECT 1")
 		self.db.close()

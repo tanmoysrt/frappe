@@ -124,6 +124,35 @@ def shutdown_pools():
 atexit.register(shutdown_pools)
 
 
+# Parent driver objects a forked child must never GC: any __del__ in the
+# chain (Connection -> StreamWriter -> transport) ends in transport.close()
+# -> loop._remove_reader() -> epoll_ctl(DEL) on the epoll instance the child
+# SHARES with the parent — silently unsubscribing the parent's reader, which
+# then waits forever for a reply sitting unread in the socket buffer
+# (reproduced: fork during CLI, child connects, parent hangs on next read).
+_fork_quarantine = {"refs": [], "conn_ids": set()}
+
+
+def _quarantine_inherited_pools():
+	"""after-fork (child) hook: park the parent's pools (and their conns)
+	in a process-lifetime quarantine so child GC can't touch shared kernel
+	state, then hand the child a fresh registry. The quarantined sockets
+	die with the child's fd table — a few objects held in a short-lived
+	worker, not a leak that grows."""
+	if _registry["pid"] == os.getpid() or not _registry["pools"]:
+		return
+	_fork_quarantine["refs"].append(_registry["pools"])
+	for pool in _registry["pools"].values():
+		for conn in [*getattr(pool, "_free", ()), *getattr(pool, "_used", ())]:
+			_fork_quarantine["conn_ids"].add(id(conn))
+	_registry.update(
+		pid=os.getpid(), pools={}, last_used={}, idle_timeout={}, lock=asyncio.Lock(), evict=None
+	)
+
+
+os.register_at_fork(after_in_child=_quarantine_inherited_pools)
+
+
 async def _get_pool(key, conn_settings, maxsize, pool_recycle, idle_timeout):
 	"""Lazily create (under the registry lock) or fetch the pool for ``key``.
 	Module function fed pre-read config — runs in a clean context (see
@@ -178,6 +207,11 @@ async def _release_conn(aconn, key):
 	Module-level (not a Database method) so the adapter holds no reference
 	back to the Database instance — that cycle would defeat the prompt
 	refcount collection the leak finalizer below relies on."""
+	if id(aconn) in _fork_quarantine["conn_ids"]:
+		# parent's connection seen from a forked child: hands off entirely —
+		# a rollback would WRITE on the parent's socket, a close would
+		# epoll_ctl the shared epoll. It dies with the child's fd table.
+		return
 	reg = _reg()
 	pool = reg["pools"].get(key)
 	try:
@@ -197,7 +231,9 @@ def _release_leaked(aconn, key):
 	conn would be closed by refcount GC — pooled conns sit in pool._used
 	forever instead, starving the pool. Restore the GC semantics."""
 	try:
-		if _registry["pid"] != os.getpid() or aconn.closed:
+		if id(aconn) in _fork_quarantine["conn_ids"] or aconn.closed:
+			return
+		if _registry["pid"] != os.getpid():
 			return
 		from frappe.dispatch import get_bridge_loop
 
@@ -224,7 +260,12 @@ class AsyncMariaDBDatabase(MariaDBDatabase):
 		)
 		aconn = run_coroutine_sync(run_in_clean_context(coro))
 		bridged = BridgedConnection(aconn, releaser=partial(_release_conn, key=key))
-		bridged._finalizer = weakref.finalize(bridged, _release_leaked, aconn, key)
+		finalizer = weakref.finalize(bridged, _release_leaked, aconn, key)
+		# GC-only safety net: finalize defaults to ALSO firing at interpreter
+		# exit even while the adapter is still alive and owned — that would
+		# release the conn under atexit cleanup (console!) and double-release
+		finalizer.atexit = False
+		bridged._finalizer = finalizer
 		return bridged
 
 	def _pool_key(self):
