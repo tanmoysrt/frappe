@@ -1,170 +1,204 @@
 # Copyright (c) 2026, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
-"""ASGI entrypoint for Frappe.
+"""Raw ASGI3 entrypoint wrapping the existing Werkzeug WSGI app (Phase 1).
 
-Run from the sites directory:
-    uvicorn frappe.asgi:application --host 0.0.0.0 --port 8001 --workers 8 --loop asyncio
+Single-process light mode: boot via `python3 app.py` at bench root, which
+runs uvicorn programmatically and sets a sized ThreadPoolExecutor as the
+loop's default executor. All sync work runs through
+`sync_to_async(thread_sensitive=False)` -> that pool.
+(`thread_sensitive=True` serializes every request through one thread —
+the 16-rps trap. Never use it.)
 
-Rendering is CPU-bound and GIL-limited, so worker processes (not threads)
-are what scale throughput — same as gunicorn -w.
+No Starlette, no asgiref WsgiToAsgi (serial + never closes the WSGI
+iterator). The Werkzeug handler in frappe/app.py is reused unchanged:
+Werkzeug parses multipart/content-negotiation/range/conditional straight
+from environ.
 
 Env toggles (same as frappe.app.serve): NO_STATICS, USE_PROXY.
 """
 
-import sysconfig
-import asyncio
-
-asyncio.iscoroutinefunction()
-
-
-
-sysconfig.get_config_var("Py_GIL_DISABLED")
-
-# gevent must patch before anything else imports socket/ssl/time.
-# thread=False: uvicorn's threads (and GeventExecutor's hub thread) must stay
-#   real threads; patched ones would become greenlets starving the asyncio loop.
-# select=False: asyncio keeps the real epoll primitives.
-# queue=False: GeventExecutor's task queue must stay a real queue.SimpleQueue.
-from gevent import monkey
-
-monkey.patch_all(thread=False, select=False, queue=False)
-
-# Two repairs so uvicorn's multiprocess supervisor survives the patch:
-# 1. It pickles the listening socket to spawned workers, and gevent sockets
-#    refuse to pickle. Register the stdlib reducer (dup the fd) for the
-#    patched class; workers rebuild a plain socket, which is what their
-#    asyncio loop needs anyway.
-# 2. Its worker ping/pong Pipe() is a socketpair; created via the patched
-#    module the fds come out non-blocking and the worker's Connection.recv()
-#    dies with BlockingIOError, making the supervisor cycle healthy workers.
-#    Hand multiprocessing the original (blocking) socket module.
-import multiprocessing.connection
-import socket
-import types
-from multiprocessing import reduction
-
-reduction.ForkingPickler.register(socket.socket, reduction._reduce_socket)
-
-_real_socket = types.ModuleType("socket_unpatched")
-_real_socket.__dict__.update(socket.__dict__)
-_names = ("socket", "socketpair", "fromfd")
-_real_socket.__dict__.update(zip(_names, monkey.get_original("socket", _names), strict=True))
-multiprocessing.connection.socket = _real_socket
-
-import functools
 import os
-import queue
-import threading
-from concurrent.futures import Executor, Future
+import sys
+from tempfile import SpooledTemporaryFile
 
-import gevent
 from asgiref.sync import sync_to_async
-from asgiref.wsgi import WsgiToAsgi, WsgiToAsgiInstance
 
+import frappe
 import frappe.app
 
+# big uploads spill to disk past this, so buffering never pins RSS
+_SPOOL_MAX = 1024 * 1024
 
-class GeventExecutor(Executor):
-	"""Runs every submitted call as a greenlet on one dedicated gevent thread.
-
-	A regular thread pool breaks under gevent: frappe shares redis/DB clients
-	across requests, and a gevent socket created on one thread cannot be used
-	from another ("greenlet.error: Cannot switch to a different thread").
-	Pinning all greenlets to a single hub thread keeps every gevent object on
-	the same hub while requests still interleave on IO. Requires cooperative
-	drivers (use_mysqlclient=0 -> pymysql); mysqlclient's C calls would block
-	the whole hub.
-	"""
-
-	def __init__(self):
-		self._tasks = queue.SimpleQueue()  # stays unpatched (queue=False)
-		ready = threading.Event()
-		threading.Thread(target=self._run, args=(ready,), name="frappe_gevent", daemon=True).start()
-		ready.wait()
-
-	def _run(self, ready):
-		hub = gevent.get_hub()
-		# async_ watcher: the only gevent primitive that may be poked from
-		# another thread; wakes the hub to drain the task queue
-		self._watcher = hub.loop.async_()
-		self._watcher.start(self._drain)
-		ready.set()
-		hub.join()
-
-	def _drain(self):
-		while True:
-			try:
-				task = self._tasks.get_nowait()
-			except queue.Empty:
-				return
-			gevent.spawn(self._invoke, *task)
-
-	@staticmethod
-	def _invoke(future, fn, args, kwargs):
-		if not future.set_running_or_notify_cancel():
-			return
-		try:
-			future.set_result(fn(*args, **kwargs))
-		except BaseException as e:
-			future.set_exception(e)
-
-	def submit(self, fn, /, *args, **kwargs):
-		future = Future()
-		self._tasks.put((future, fn, args, kwargs))
-		self._watcher.send()
-		return future
-
-
-_executor = GeventExecutor()
-
-
-# WsgiToAsgi runs the WSGI app via sync_to_async(thread_sensitive=True),
-# which serializes all requests through one shared thread. Rewrap it to run
-# greenlet-per-request on the gevent executor. (__dict__ access fetches the
-# raw SyncToAsync wrapper; attribute access would return a bound async partial.)
-class _ConcurrentInstance(WsgiToAsgiInstance):
-	run_wsgi_app = sync_to_async(
-		WsgiToAsgiInstance.__dict__["run_wsgi_app"].func,
-		thread_sensitive=False,
-		executor=_executor,
-	)
-
-
-class ConcurrentWsgiToAsgi(WsgiToAsgi):
-	async def __call__(self, scope, receive, send):
-		await _ConcurrentInstance(self.wsgi_application, self.duplicate_header_limit)(scope, receive, send)
-
-
-def _closing(app):
-	"""asgiref iterates the WSGI response but never calls .close() on it
-	(PEP 3333 requires it). Frappe runs its per-request cleanup — DB
-	disconnect, rate limiter, after_response hooks — from ClosingIterator's
-	close, so without this every request leaks a DB connection."""
-
-	@functools.wraps(app)
-	def wrapper(environ, start_response):
-		iterable = app(environ, start_response)
-		try:
-			yield from iterable
-		finally:
-			if close := getattr(iterable, "close", None):
-				close()
-
-	return wrapper
+_DONE = object()
 
 
 def _build_wsgi_app():
+	"""Build the same WSGI stack frappe.app.serve() builds, once at import."""
 	app = frappe.app.application
-
 	if not os.environ.get("NO_STATICS"):
+		# mutates frappe.app.application: SharedData(/assets) + StaticData(/files)
 		app = frappe.app.application_with_statics()
-
 	if os.environ.get("USE_PROXY"):
 		from werkzeug.middleware.proxy_fix import ProxyFix
 
 		app = ProxyFix(app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
+	return app
 
-	return _closing(app)
+
+_wsgi_app = _build_wsgi_app()
 
 
-application = ConcurrentWsgiToAsgi(_build_wsgi_app())
+async def application(scope, receive, send):
+	if scope["type"] == "http":
+		await _handle_http(scope, receive, send)
+	elif scope["type"] == "lifespan":
+		await _lifespan(scope, receive, send)
+	elif scope["type"] == "websocket":
+		# no websockets in this process yet — socket.io is still the Node proc
+		await receive()
+		await send({"type": "websocket.close"})
+
+
+async def _lifespan(scope, receive, send):
+	while True:
+		message = await receive()
+		if message["type"] == "lifespan.startup":
+			# later phases start queue workers / scheduler tick tasks here
+			await send({"type": "lifespan.startup.complete"})
+		elif message["type"] == "lifespan.shutdown":
+			# later phases cancel/await background tasks here
+			await send({"type": "lifespan.shutdown.complete"})
+			return
+
+
+async def _read_body(receive):
+	"""Buffer the request body before entering the pool thread (sync Werkzeug
+	cannot await receive()). Returns None if the client disconnected."""
+	body = SpooledTemporaryFile(max_size=_SPOOL_MAX, mode="w+b")
+	while True:
+		message = await receive()
+		if message["type"] == "http.disconnect":
+			body.close()
+			return None
+		body.write(message.get("body", b""))
+		if not message.get("more_body", False):
+			break
+	size = body.tell()
+	body.seek(0)
+	return body, size
+
+
+def _build_environ(scope, body, content_length):
+	# ASGI `path` is already %-decoded; Werkzeug wants the raw PATH_INFO,
+	# so prefer raw_path to avoid double-decoding e.g. /files names.
+	raw_path = scope.get("raw_path")
+	path_info = raw_path.split(b"?", 1)[0].decode("latin-1") if raw_path else scope["path"]
+
+	environ = {
+		"REQUEST_METHOD": scope["method"],
+		"SCRIPT_NAME": scope.get("root_path", ""),
+		"PATH_INFO": path_info,
+		"QUERY_STRING": scope["query_string"].decode("latin-1"),
+		"SERVER_PROTOCOL": "HTTP/" + scope.get("http_version", "1.1"),
+		"CONTENT_LENGTH": str(content_length),
+		"wsgi.version": (1, 0),
+		"wsgi.url_scheme": scope.get("scheme", "http"),
+		"wsgi.input": body,
+		"wsgi.errors": sys.stderr,
+		"wsgi.multithread": True,
+		"wsgi.multiprocess": False,
+		"wsgi.run_once": False,
+	}
+
+	server = scope.get("server") or ("localhost", 80)
+	environ["SERVER_NAME"] = server[0]
+	environ["SERVER_PORT"] = str(server[1] or 80)
+	if client := scope.get("client"):
+		environ["REMOTE_ADDR"] = client[0]
+		environ["REMOTE_PORT"] = str(client[1])
+
+	for key, value in scope["headers"]:
+		name = key.decode("latin-1").upper().replace("-", "_")
+		value = value.decode("latin-1")
+		if name == "CONTENT_TYPE":
+			environ["CONTENT_TYPE"] = value
+		elif name == "CONTENT_LENGTH":
+			pass  # set above from the actual buffered size
+		else:
+			name = "HTTP_" + name
+			environ[name] = f"{environ[name]},{value}" if name in environ else value
+
+	return environ
+
+
+def _write_not_supported(data):
+	raise NotImplementedError("WSGI write() callable is not supported by frappe.asgi")
+
+
+def _next_chunk(iterator):
+	try:
+		return next(iterator)
+	except StopIteration:
+		return _DONE
+
+
+def _cleanup(iterable):
+	"""Per-request cleanup, on EVERY path. Known pitfall from this bench:
+	asgiref never closed the WSGI iterator -> ClosingIterator's close (which
+	runs frappe.destroy, rate limiter, recorder, after_response) never ran ->
+	leaked 1 DB conn/request -> `1040 Too many connections`."""
+	try:
+		if iterable is not None and (close := getattr(iterable, "close", None)):
+			close()
+	finally:
+		frappe.destroy()  # defensive: idempotent, guards close() raising early
+
+
+async def _handle_http(scope, receive, send):
+	buffered = await _read_body(receive)
+	if buffered is None:
+		return
+	body, content_length = buffered
+
+	environ = _build_environ(scope, body, content_length)
+	response = {}
+
+	def start_response(status, headers, exc_info=None):
+		if exc_info:
+			try:
+				if response.get("started"):
+					raise exc_info[1].with_traceback(exc_info[2])
+			finally:
+				exc_info = None
+		response["status"] = int(status.split(" ", 1)[0])
+		response["headers"] = headers
+		return _write_not_supported
+
+	iterable = None
+	try:
+		# the whole Werkzeug/frappe request runs in one pool thread;
+		# start_response is called inside it (werkzeug Response.__call__)
+		iterable = await sync_to_async(_wsgi_app, thread_sensitive=False)(environ, start_response)
+
+		await send(
+			{
+				"type": "http.response.start",
+				"status": response["status"],
+				"headers": [(k.encode("latin-1"), v.encode("latin-1")) for k, v in response["headers"]],
+			}
+		)
+		response["started"] = True
+
+		# stream the body chunk by chunk — each next() may block (disk reads
+		# for direct_passthrough file wrappers), so it runs on the pool.
+		# Pulling one chunk at a time gives natural backpressure; the body is
+		# never materialized.
+		iterator = iter(iterable)
+		next_chunk = sync_to_async(_next_chunk, thread_sensitive=False)
+		while (chunk := await next_chunk(iterator)) is not _DONE:
+			if chunk:
+				await send({"type": "http.response.body", "body": chunk, "more_body": True})
+		await send({"type": "http.response.body", "body": b"", "more_body": False})
+	finally:
+		await sync_to_async(_cleanup, thread_sensitive=False)(iterable)
+		body.close()
