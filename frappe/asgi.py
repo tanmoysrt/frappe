@@ -17,10 +17,13 @@ from environ.
 Env toggles (same as frappe.app.serve): NO_STATICS, USE_PROXY.
 """
 
+import asyncio
+import io
 import os
 import sys
-from tempfile import SpooledTemporaryFile
+from tempfile import TemporaryFile
 
+from aiofiles.threadpool import wrap as _aio_wrap
 from asgiref.sync import sync_to_async
 
 import frappe
@@ -73,19 +76,47 @@ async def _lifespan(scope, receive, send):
 
 async def _read_body(receive):
 	"""Buffer the request body before entering the pool thread (sync Werkzeug
-	cannot await receive()). Returns None if the client disconnected."""
-	body = SpooledTemporaryFile(max_size=_SPOOL_MAX, mode="w+b")
+	cannot await receive()). Small bodies stay in memory; past _SPOOL_MAX the
+	body spills to a temp file written through aiofiles (Phase 4), so big
+	uploads never pin RSS and their disk writes never block the loop.
+	Returns None if the client disconnected."""
+	buffer = bytearray()
+	spill = None  # (raw sync file, aiofiles wrapper) once over _SPOOL_MAX
 	while True:
 		message = await receive()
 		if message["type"] == "http.disconnect":
-			body.close()
+			if spill:
+				await spill[1].close()
 			return None
-		body.write(message.get("body", b""))
+		chunk = message.get("body", b"")
+		if spill:
+			await spill[1].write(chunk)
+		else:
+			buffer += chunk
+			if len(buffer) > _SPOOL_MAX:
+				spill = await _spill_to_disk(buffer)
+				buffer = None
 		if not message.get("more_body", False):
 			break
-	size = body.tell()
-	body.seek(0)
-	return body, size
+
+	if spill:
+		raw, wrapped = spill
+		await wrapped.flush()
+		size = raw.tell()  # fd-offset lookups, no disk wait
+		raw.seek(0)
+		return raw, size
+	return io.BytesIO(buffer), len(buffer)
+
+
+async def _spill_to_disk(buffer):
+	"""Move an over-limit body to disk: open the temp file in a pool thread,
+	then write through aiofiles (runs on the loop's default executor — the
+	sized pool from app.py). The raw sync file is what Werkzeug reads as
+	wsgi.input in its pool thread."""
+	raw = await sync_to_async(TemporaryFile, thread_sensitive=False)("w+b")
+	wrapped = _aio_wrap(raw, loop=asyncio.get_running_loop(), executor=None)
+	await wrapped.write(buffer)
+	return raw, wrapped
 
 
 def _build_environ(scope, body, content_length):
@@ -213,4 +244,8 @@ async def _handle_http(scope, receive, send):
 		# rare path: error/disconnect before the stream finished cleanly
 		if not response.get("cleaned"):
 			await sync_to_async(_cleanup, thread_sensitive=False)(iterable, response)
-		body.close()
+		if isinstance(body, io.BytesIO):
+			body.close()
+		else:
+			# spilled temp file: close unlinks it on disk — keep that off the loop
+			await sync_to_async(body.close, thread_sensitive=False)()
