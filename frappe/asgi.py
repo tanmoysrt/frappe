@@ -135,23 +135,33 @@ def _write_not_supported(data):
 	raise NotImplementedError("WSGI write() callable is not supported by frappe.asgi")
 
 
-def _next_chunk(iterator):
-	try:
-		return next(iterator)
-	except StopIteration:
-		return _DONE
-
-
-def _cleanup(iterable):
-	"""Per-request cleanup, on EVERY path. Known pitfall from this bench:
-	asgiref never closed the WSGI iterator -> ClosingIterator's close (which
-	runs frappe.destroy, rate limiter, recorder, after_response) never ran ->
-	leaked 1 DB conn/request -> `1040 Too many connections`."""
+def _cleanup(iterable, state):
+	"""Per-request cleanup, on EVERY path, exactly once. Known pitfall from
+	this bench: asgiref never closed the WSGI iterator -> ClosingIterator's
+	close (which runs frappe.destroy, rate limiter, recorder, after_response)
+	never ran -> leaked 1 DB conn/request -> `1040 Too many connections`."""
+	if state.get("cleaned"):
+		return
+	state["cleaned"] = True
 	try:
 		if iterable is not None and (close := getattr(iterable, "close", None)):
 			close()
 	finally:
 		frappe.destroy()  # defensive: idempotent, guards close() raising early
+
+
+def _next_chunk(iterator, iterable, state):
+	try:
+		return next(iterator)
+	except StopIteration:
+		# cleanup HERE, before the terminal ASGI send: uvicorn starts the
+		# next request on this connection as soon as the response completes,
+		# so cleanup queued after it (in the FIFO pool) lags under load —
+		# measured: DB conns piled to 150+ at -c10 -> 1040 Too many
+		# connections. Closing before the final send bounds open conns to
+		# the number of concurrent clients.
+		_cleanup(iterable, state)
+		return _DONE
 
 
 async def _handle_http(scope, receive, send):
@@ -195,10 +205,12 @@ async def _handle_http(scope, receive, send):
 		# never materialized.
 		iterator = iter(iterable)
 		next_chunk = sync_to_async(_next_chunk, thread_sensitive=False)
-		while (chunk := await next_chunk(iterator)) is not _DONE:
+		while (chunk := await next_chunk(iterator, iterable, response)) is not _DONE:
 			if chunk:
 				await send({"type": "http.response.body", "body": chunk, "more_body": True})
 		await send({"type": "http.response.body", "body": b"", "more_body": False})
 	finally:
-		await sync_to_async(_cleanup, thread_sensitive=False)(iterable)
+		# rare path: error/disconnect before the stream finished cleanly
+		if not response.get("cleaned"):
+			await sync_to_async(_cleanup, thread_sensitive=False)(iterable, response)
 		body.close()
