@@ -118,6 +118,7 @@ class Database:
 		self.password = password
 		self.cur_db_name = cur_db_name
 		self._conn = None
+		self._aio = None
 
 		self.transaction_writes = 0
 		self.auto_commit_on_many_writes = 0
@@ -140,6 +141,17 @@ class Database:
 
 	def setup_type_map(self):
 		pass
+
+	@property
+	def aio(self):
+		"""Awaitable facade for async handlers (Phase 8):
+		``await frappe.db.aio.get_value(...)``. Methods run on the worker
+		thread pool, never blocking the event loop. Works on every backend."""
+		if self._aio is None:
+			from frappe.database.aio import AsyncDatabaseFacade
+
+			self._aio = AsyncDatabaseFacade(self)
+		return self._aio
 
 	def connect(self):
 		"""Connects to a database as set in `site_config.json`."""
