@@ -11,7 +11,8 @@ from werkzeug.wrappers import Response
 import frappe
 import frappe.sessions
 import frappe.utils
-from frappe import _, is_whitelisted, ping
+from frappe import _, get_newargs, is_whitelisted, ping
+from frappe.dispatch import dispatch_sync
 from frappe.core.doctype.file.utils import find_file_by_url, get_safe_file_name
 from frappe.core.doctype.server_script.server_script_utils import get_server_script_map
 from frappe.monitor import add_data_to_monitor
@@ -84,7 +85,9 @@ def execute_cmd(cmd, from_async=False):
 		is_whitelisted(method)
 		is_valid_http_method(method)
 
-	return frappe.call(method, **frappe.form_dict)
+	# async-aware dispatch (Phase 2): sync handlers run inline (this thread is
+	# a pool worker), async handlers bridge to the event loop
+	return dispatch_sync(method, **get_newargs(method, frappe.form_dict))
 
 
 def run_server_script(server_script):

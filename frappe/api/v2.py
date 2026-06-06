@@ -17,6 +17,7 @@ import frappe
 import frappe.client
 from frappe import _, cint, cstr, get_newargs, is_whitelisted
 from frappe.core.doctype.server_script.server_script_utils import get_server_script_map
+from frappe.dispatch import dispatch_sync
 from frappe.handler import is_valid_http_method, run_server_script, upload_file
 
 PERMISSION_MAP = {
@@ -63,7 +64,8 @@ def handle_rpc_call(method: str, doctype: str | None = None):
 	is_whitelisted(method)
 	is_valid_http_method(method)
 
-	return frappe.call(method, **frappe.form_dict)
+	# async-aware dispatch (Phase 2)
+	return dispatch_sync(method, **get_newargs(method, frappe.form_dict))
 
 
 def login():

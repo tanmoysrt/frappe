@@ -9,6 +9,7 @@ from werkzeug.wrappers import Request, Response
 
 import frappe
 from frappe import _
+from frappe.dispatch import dispatch_sync
 from frappe.modules.utils import get_doctype_app_map
 from frappe.monitor import add_data_to_monitor
 from frappe.utils.response import build_response
@@ -60,7 +61,8 @@ def handle(request: Request):
 	except NotFound:  # Wrap 404 - backward compatiblity
 		raise frappe.DoesNotExistError
 
-	data = endpoint(**arguments)
+	# async-aware dispatch (Phase 2): REST endpoints may be sync or async
+	data = dispatch_sync(endpoint, **arguments)
 	if isinstance(data, Response):
 		return data
 
