@@ -13,7 +13,7 @@ from datetime import date, datetime, time
 
 import aiosqlite
 
-from frappe.database.aio import BridgedConnection
+from frappe.database.aio import BridgedConnection, run_in_clean_context
 from frappe.database.sqlite.database import SQLiteDatabase, regexp, regexp_replace
 from frappe.dispatch import run_coroutine_sync
 
@@ -33,27 +33,32 @@ class AsyncSQLiteDatabase(SQLiteDatabase):
 	"""SQLiteDatabase on aiosqlite. One connection per site (no pool), WAL."""
 
 	def get_connection(self, read_only: bool = False):
-		return BridgedConnection(run_coroutine_sync(self._aconnect(read_only)))
-
-	async def _aconnect(self, read_only: bool):
-		# converters are registered on the sqlite3 module (global, idempotent)
-		sqlite3.register_converter("timestamp", lambda x: datetime.fromisoformat(x.decode()))
-		sqlite3.register_converter("date", lambda x: date.fromisoformat(x.decode()))
-		sqlite3.register_converter("time", lambda x: time.fromisoformat(x.decode()))
-
+		# site context read HERE (caller thread); the connect coroutine runs
+		# context-free — aiosqlite's worker thread inherits the ambient
+		# context at creation and would otherwise pin this request's
+		# frappe.local for the connection's whole life
 		db_path = self.get_db_path()
-		if read_only:
-			conn = await aiosqlite.connect(
-				f"file:{db_path}?mode=ro",
-				uri=True,
-				detect_types=sqlite3.PARSE_DECLTYPES,
-				timeout=15,
-			)
-		else:
-			conn = await aiosqlite.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=15)
+		return BridgedConnection(run_coroutine_sync(run_in_clean_context(_aconnect(db_path, read_only))))
 
-		await conn.create_function("regexp", 2, regexp)
-		await conn.create_function("regexp_replace", 3, regexp_replace)
-		for pragma, value in PRAGMAS.items():
-			await conn.execute(f"PRAGMA {pragma}={value}")
-		return conn
+
+async def _aconnect(db_path, read_only: bool):
+	# converters are registered on the sqlite3 module (global, idempotent)
+	sqlite3.register_converter("timestamp", lambda x: datetime.fromisoformat(x.decode()))
+	sqlite3.register_converter("date", lambda x: date.fromisoformat(x.decode()))
+	sqlite3.register_converter("time", lambda x: time.fromisoformat(x.decode()))
+
+	if read_only:
+		conn = await aiosqlite.connect(
+			f"file:{db_path}?mode=ro",
+			uri=True,
+			detect_types=sqlite3.PARSE_DECLTYPES,
+			timeout=15,
+		)
+	else:
+		conn = await aiosqlite.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=15)
+
+	await conn.create_function("regexp", 2, regexp)
+	await conn.create_function("regexp_replace", 3, regexp_replace)
+	for pragma, value in PRAGMAS.items():
+		await conn.execute(f"PRAGMA {pragma}={value}")
+	return conn

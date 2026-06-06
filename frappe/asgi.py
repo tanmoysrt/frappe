@@ -69,9 +69,17 @@ async def _lifespan(scope, receive, send):
 			# later phases start queue workers / scheduler tick tasks here
 			await send({"type": "lifespan.startup.complete"})
 		elif message["type"] == "lifespan.shutdown":
-			# later phases cancel/await background tasks here
+			# close per-site DB pools (Phase 6); they live on the bridge
+			# loop, so go through a pool thread -> run_coroutine_sync
+			await sync_to_async(_shutdown_db_pools, thread_sensitive=False)()
 			await send({"type": "lifespan.shutdown.complete"})
 			return
+
+
+def _shutdown_db_pools():
+	# lazy: only if the async mariadb backend was ever used
+	if mod := sys.modules.get("frappe.database.mariadb.aio"):
+		mod.shutdown_pools()
 
 
 async def _read_body(receive):

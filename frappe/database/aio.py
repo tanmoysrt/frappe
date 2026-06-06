@@ -15,9 +15,37 @@ awaitable via ``frappe.db.aio`` — each call runs the sync method on the
 worker thread pool, so the event loop never blocks on DB I/O.
 """
 
+import asyncio
+import contextvars
+
 from asgiref.sync import sync_to_async
 
 from frappe.dispatch import run_coroutine_sync
+
+
+async def run_in_clean_context(coro):
+	"""Run ``coro`` in a Task with an empty contextvars.Context.
+
+	Long-lived driver objects capture the ambient context at creation —
+	asyncio transports keep it on their reader Handle, aiosqlite's worker
+	thread inherits it, background tasks hold it. Created inside a request,
+	that pins the request's whole frappe.local dict (db, request, ...) in
+	memory for the connection's lifetime. Connection/pool creation therefore
+	runs context-free: read config in the caller and pass plain values in;
+	frappe.local does not exist inside ``coro``.
+	"""
+	return await asyncio.get_running_loop().create_task(coro, context=contextvars.Context())
+
+
+async def _await(awaitable):
+	return await awaitable
+
+
+def _bridge(awaitable):
+	"""run_coroutine_sync for any awaitable — aiomysql hands out
+	_ContextManager awaitables (cursor(), acquire()) which
+	run_coroutine_threadsafe rejects; wrapping makes them real coroutines."""
+	return run_coroutine_sync(_await(awaitable))
 
 
 async def _close_connection(aconn):
@@ -36,19 +64,19 @@ class BridgedCursor:
 		self._acursor = acursor
 
 	def execute(self, query, args=None):
-		return run_coroutine_sync(self._acursor.execute(query, args))
+		return _bridge(self._acursor.execute(query, args))
 
 	def fetchone(self):
-		return run_coroutine_sync(self._acursor.fetchone())
+		return _bridge(self._acursor.fetchone())
 
 	def fetchmany(self, size=1):
-		return run_coroutine_sync(self._acursor.fetchmany(size))
+		return _bridge(self._acursor.fetchmany(size))
 
 	def fetchall(self):
-		return run_coroutine_sync(self._acursor.fetchall())
+		return _bridge(self._acursor.fetchall())
 
 	def close(self):
-		return run_coroutine_sync(self._acursor.close())
+		return _bridge(self._acursor.close())
 
 	def __getattr__(self, name):
 		return getattr(self._acursor, name)
@@ -67,19 +95,23 @@ class BridgedConnection:
 		self._releaser = releaser
 
 	def cursor(self, *args, **kwargs):
-		return BridgedCursor(run_coroutine_sync(self._aconn.cursor(*args, **kwargs)))
+		return BridgedCursor(_bridge(self._aconn.cursor(*args, **kwargs)))
 
 	def commit(self):
-		return run_coroutine_sync(self._aconn.commit())
+		return _bridge(self._aconn.commit())
 
 	def rollback(self):
-		return run_coroutine_sync(self._aconn.rollback())
+		return _bridge(self._aconn.rollback())
 
 	def select_db(self, db_name):
-		return run_coroutine_sync(self._aconn.select_db(db_name))
+		return _bridge(self._aconn.select_db(db_name))
 
 	def close(self):
-		return run_coroutine_sync(self._releaser(self._aconn))
+		# a leak finalizer (if the backend attached one) must not fire after
+		# an orderly close — that would release the same conn twice
+		if finalizer := self.__dict__.get("_finalizer"):
+			finalizer.detach()
+		return _bridge(self._releaser(self._aconn))
 
 	def __getattr__(self, name):
 		return getattr(self._aconn, name)
