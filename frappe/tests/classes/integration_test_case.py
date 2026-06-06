@@ -139,21 +139,31 @@ class IntegrationTestCase(UnitTestCase):
 
 	@contextmanager
 	def assertRedisCallCounts(self, count: int, *, exact=False) -> AbstractContextManager[None]:
-		from frappe.utils.redis_wrapper import RedisWrapper
+		from frappe.utils.redis_wrapper import AsyncRedisWrapper, RedisWrapper
 
 		commands = []
 
-		def execute_command_and_count(*args, **kwargs):
-			ret = orig_execute(*args, **kwargs)
+		def _count(args):
 			key_len = 2
 			if "H" in args[1]:
 				key_len = 3
 			commands.append((args)[1 : key_len + 1])
+
+		def execute_command_and_count(*args, **kwargs):
+			ret = orig_execute(*args, **kwargs)
+			_count(args)
+			return ret
+
+		async def async_execute_command_and_count(*args, **kwargs):
+			ret = await orig_async_execute(*args, **kwargs)
+			_count(args)
 			return ret
 
 		try:
 			orig_execute = RedisWrapper.execute_command
+			orig_async_execute = AsyncRedisWrapper.execute_command
 			RedisWrapper.execute_command = execute_command_and_count
+			AsyncRedisWrapper.execute_command = async_execute_command_and_count
 			yield
 			msg = "commands executed: \n" + "\n".join(str(c) for c in commands)
 			if exact:
@@ -162,6 +172,7 @@ class IntegrationTestCase(UnitTestCase):
 				self.assertLessEqual(len(commands), count, msg=msg)
 		finally:
 			RedisWrapper.execute_command = orig_execute
+			AsyncRedisWrapper.execute_command = orig_async_execute
 
 	@contextmanager
 	def assertRowsRead(self, count: int) -> AbstractContextManager[None]:

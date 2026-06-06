@@ -1,6 +1,9 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
+import asyncio
+import inspect
 import json
+import os
 import pickle
 import re
 import threading
@@ -9,6 +12,7 @@ from collections import namedtuple
 from contextlib import suppress
 
 import redis
+import redis.asyncio
 import redis.exceptions
 from redis.commands.search import Search
 from redis.exceptions import ResponseError
@@ -19,6 +23,20 @@ from frappe.utils import cstr
 # 5 is faster than default which is 4.
 # Python uses old protocol for backward compatibility, we don't support anything <3.10.
 DEFAULT_PICKLE_PROTOCOL = 5
+
+
+def _make_key(key, user=None, shared=False):
+	"""Prefix `key` with the site's db_name (and optionally the user)."""
+	if shared:
+		return key
+
+	if user:
+		if user is True:
+			user = frappe.local.session.get("user")
+
+		key = f"user:{user}:{key}"
+
+	return f"{frappe.local.conf.get('db_name')}|{key}".encode()
 
 
 class RedisearchWrapper(Search):
@@ -38,6 +56,12 @@ class RedisearchWrapper(Search):
 class RedisWrapper(redis.Redis):
 	"""Redis client that will automatically prefix conf.db_name"""
 
+	@property
+	def aio(self) -> "AsyncRedisWrapper":
+		"""Async-primary client for the running loop (Phase 3):
+		``await frappe.cache.aio.get_value(...)`` from async handlers."""
+		return get_async_cache()
+
 	def connected(self):
 		try:
 			self.ping()
@@ -50,16 +74,7 @@ class RedisWrapper(redis.Redis):
 		return self
 
 	def make_key(self, key, user=None, shared=False):
-		if shared:
-			return key
-
-		if user:
-			if user is True:
-				user = frappe.local.session.get("user")
-
-			key = f"user:{user}:{key}"
-
-		return f"{frappe.local.conf.get('db_name')}|{key}".encode()
+		return _make_key(key, user, shared)
 
 	def set_value(self, key, val, user=None, expires_in_sec=None, shared=False):
 		"""Sets cache value.
@@ -366,6 +381,381 @@ class RedisWrapper(redis.Redis):
 		return RedisearchWrapper(client=self, index_name=self.make_key(index_name))
 
 
+class AsyncRedisWrapper(redis.asyncio.Redis):
+	"""Async cache client (Phase 3) — redis.asyncio port of RedisWrapper.
+
+	Same key prefixing, pickling and ``frappe.local.cache`` semantics; every
+	command is a coroutine. Async callers reach it via ``frappe.cache.aio``
+	(one client per event loop, see ``get_async_cache``); the sync codebase
+	keeps using the plain sync ``frappe.cache`` unchanged.
+	"""
+
+	def __call__(self):
+		"""WARNING: Added for backward compatibility to support frappe.cache().method(...)"""
+		return self
+
+	def make_key(self, key, user=None, shared=False):
+		return _make_key(key, user, shared)
+
+	async def connected(self):
+		try:
+			await self.ping()
+			return True
+		except redis.exceptions.ConnectionError:
+			return False
+
+	async def set_value(self, key, val, user=None, expires_in_sec=None, shared=False):
+		"""Sets cache value.
+
+		:param key: Cache key
+		:param val: Value to be cached
+		:param user: Prepends key with User
+		:param expires_in_sec: Expire value of this key in X seconds
+		"""
+		key = self.make_key(key, user, shared)
+
+		frappe.local.cache[key] = val
+
+		with suppress(redis.exceptions.ConnectionError):
+			await self.set(
+				name=key, value=pickle.dumps(val, protocol=DEFAULT_PICKLE_PROTOCOL), ex=expires_in_sec
+			)
+
+	async def get_value(
+		self, key, generator=None, user=None, expires=False, shared=False, *, use_local_cache=True
+	):
+		"""Return cache value. If not found and generator function is
+		        given, call the generator.
+
+		:param key: Cache key.
+		:param generator: Function to be called to generate a value if `None` is returned.
+		        May be sync or async; sync generators run inline on the calling loop.
+		:param expires: If the key is supposed to be with an expiry, don't store it in frappe.local
+		"""
+		original_key = key
+		key = self.make_key(key, user, shared)
+
+		local_cache = frappe.local.cache
+		if key in local_cache and use_local_cache:
+			val = local_cache[key]
+
+		else:
+			val = None
+			try:
+				val = await self.get(key)
+			except redis.exceptions.ConnectionError:
+				pass
+
+			if val is not None:
+				val = pickle.loads(val)
+
+			if not expires:
+				if val is None and generator:
+					val = generator()
+					if inspect.isawaitable(val):
+						val = await val
+					await self.set_value(original_key, val, user=user, shared=shared)
+
+				else:
+					local_cache[key] = val
+
+		return val
+
+	async def expire_key(self, key, time, *, user=None, shared=False):
+		key = self.make_key(key, user, shared)
+		try:
+			return await self.expire(key, time)
+		except redis.exceptions.ConnectionError:
+			pass
+
+	async def get_all(self, key):
+		ret = {}
+		for k in await self.get_keys(key):
+			ret[key] = await self.get_value(k)
+
+		return ret
+
+	async def get_keys(self, key, user=None, shared=False):
+		"""Return keys starting with `key`."""
+		try:
+			key = self.make_key(key + "*", user=user, shared=shared)
+			return await self.keys(key)
+
+		except redis.exceptions.ConnectionError:
+			regex = re.compile(cstr(key).replace("|", r"\|").replace("*", r"[\w]*"))
+			return [k for k in list(frappe.local.cache) if regex.match(cstr(k))]
+
+	async def delete_keys(self, key, user=None, shared=False):
+		"""Delete keys with wildcard `*`."""
+		await self.delete_value(await self.get_keys(key, user=user, shared=shared), make_keys=False)
+
+	async def delete_key(self, *args, **kwargs):
+		await self.delete_value(*args, **kwargs)
+
+	async def delete_value(self, keys, user=None, make_keys=True, shared=False):
+		"""Delete value, list of values."""
+		if not keys:
+			return
+
+		if not isinstance(keys, list | tuple):
+			keys = (keys,)
+
+		if make_keys:
+			keys = [self.make_key(k, shared=shared, user=user) for k in keys]
+
+		local_cache = frappe.local.cache
+		for key in keys:
+			local_cache.pop(key, None)
+
+		try:
+			await self.unlink(*keys)
+		except redis.exceptions.ConnectionError:
+			pass
+
+	async def lpush(self, key, value, user=None, shared=False):
+		return await super().lpush(self.make_key(key, user=user, shared=shared), value)
+
+	async def rpush(self, key, value):
+		return await super().rpush(self.make_key(key), value)
+
+	async def lpop(self, key, user=None, shared=False):
+		return await super().lpop(self.make_key(key, user=user, shared=shared))
+
+	async def rpop(self, key):
+		return await super().rpop(self.make_key(key))
+
+	async def blpop(self, key, timeout=0, user=None, shared=False):
+		return await super().blpop(self.make_key(key, user=user, shared=shared), timeout=timeout)
+
+	async def llen(self, key):
+		return await super().llen(self.make_key(key))
+
+	async def lrange(self, key, start, stop):
+		return await super().lrange(self.make_key(key), start, stop)
+
+	async def ltrim(self, key, start, stop):
+		return await super().ltrim(self.make_key(key), start, stop)
+
+	async def hset(
+		self,
+		name: str,
+		key: str,
+		value,
+		shared: bool = False,
+		*args,
+		**kwargs,
+	):
+		if key is None:
+			return
+
+		_name = self.make_key(name, shared=shared)
+
+		# set in local
+		frappe.local.cache.setdefault(_name, {})[key] = value
+
+		# set in redis
+		try:
+			await super().hset(
+				_name, key, pickle.dumps(value, protocol=DEFAULT_PICKLE_PROTOCOL), *args, **kwargs
+			)
+		except redis.exceptions.ConnectionError:
+			pass
+
+	async def hexists(self, name: str, key: str, shared: bool = False) -> bool:
+		if key is None:
+			return False
+		_name = self.make_key(name, shared=shared)
+		try:
+			return await super().hexists(_name, key)
+		except redis.exceptions.ConnectionError:
+			return False
+
+	async def exists(self, *names: str, user=None, shared=None) -> int:
+		names = [self.make_key(n, user=user, shared=shared) for n in names]
+
+		try:
+			return await super().exists(*names)
+		except redis.exceptions.ConnectionError:
+			return False
+
+	async def hgetall(self, name):
+		value = await super().hgetall(self.make_key(name))
+		return {key: pickle.loads(value) for key, value in value.items()}
+
+	async def hget(self, name, key, generator=None, shared=False):
+		_name = self.make_key(name, shared=shared)
+
+		local_cache = frappe.local.cache
+		if _name not in local_cache:
+			local_cache[_name] = {}
+
+		if not key:
+			return None
+
+		if key in local_cache[_name]:
+			return local_cache[_name][key]
+
+		value = None
+		try:
+			value = await super().hget(_name, key)
+		except redis.exceptions.ConnectionError:
+			pass
+
+		if value is not None:
+			value = pickle.loads(value)
+			local_cache[_name][key] = value
+		elif generator:
+			value = generator()
+			if inspect.isawaitable(value):
+				value = await value
+			await self.hset(name, key, value, shared=shared)
+		return value
+
+	async def hdel(
+		self,
+		name: str,
+		keys: str | list | tuple,
+		shared=False,
+		pipeline: "redis.asyncio.client.Pipeline | None" = None,
+	):
+		"""
+		A wrapper around redis' HDEL command
+
+		:param name: The hash name
+		:param keys: the keys to delete
+		:param shared: shared frappe key or not
+		:param pipeline: A redis.asyncio.client.Pipeline object, if this transaction is to be run in a pipeline
+		"""
+		_name = self.make_key(name, shared=shared)
+
+		name_in_local_cache = _name in frappe.local.cache
+
+		if not isinstance(keys, list | tuple):
+			if name_in_local_cache and keys in frappe.local.cache[_name]:
+				del frappe.local.cache[_name][keys]
+			if pipeline:
+				pipeline.hdel(_name, keys)
+			else:
+				try:
+					await super().hdel(_name, keys)
+				except redis.exceptions.ConnectionError:
+					pass
+			return
+
+		local_pipeline = False
+
+		if pipeline is None:
+			pipeline = self.pipeline()
+			local_pipeline = True
+
+		for key in keys:
+			if name_in_local_cache:
+				if key in frappe.local.cache[_name]:
+					del frappe.local.cache[_name][key]
+			pipeline.hdel(_name, key)
+
+		if local_pipeline:
+			try:
+				await pipeline.execute()
+			except redis.exceptions.ConnectionError:
+				pass
+
+	async def hdel_names(self, names: list | tuple, key: str):
+		"""
+		A function to call HDEL on multiple hash names with a common key, run in a single pipeline
+
+		:param names: The hash names
+		:param key: The common key
+		"""
+		pipeline = self.pipeline()
+		for name in names:
+			await self.hdel(name, key, pipeline=pipeline)
+		try:
+			await pipeline.execute()
+		except redis.exceptions.ConnectionError:
+			pass
+
+	async def hdel_keys(self, name_starts_with, key):
+		"""Delete hash names with wildcard `*` and key"""
+		pipeline = self.pipeline()
+		for name in await self.get_keys(name_starts_with):
+			name = name.split("|", 1)[1]
+			await self.hdel(name, key, pipeline=pipeline)
+		try:
+			await pipeline.execute()
+		except redis.exceptions.ConnectionError:
+			pass
+
+	async def hkeys(self, name):
+		try:
+			return await super().hkeys(self.make_key(name))
+		except redis.exceptions.ConnectionError:
+			return []
+
+	async def sadd(self, name, *values):
+		"""Add a member/members to a given set"""
+		await super().sadd(self.make_key(name), *values)
+
+	async def srem(self, name, *values):
+		"""Remove a specific member/list of members from the set."""
+		await super().srem(self.make_key(name), *values)
+
+	async def sismember(self, name, value):
+		"""Return True or False based on if a given value is present in the set."""
+		return await super().sismember(self.make_key(name), value)
+
+	async def spop(self, name):
+		"""Remove and returns a random member from the set."""
+		return await super().spop(self.make_key(name))
+
+	async def srandmember(self, name, count=None):
+		"""Return a random member from the set."""
+		return await super().srandmember(self.make_key(name))
+
+	async def smembers(self, name):
+		"""Return all members of the set."""
+		return await super().smembers(self.make_key(name))
+
+
+# Async clients are loop-bound: pooled connections can't hop event loops, so
+# hand out one AsyncRedisWrapper per (pid, loop). pid in the key keeps forked
+# workers from reusing parent connections.
+_async_cache_clients = {}
+_async_cache_lock = threading.Lock()
+
+
+def get_async_cache(loop=None) -> AsyncRedisWrapper:
+	"""Return the AsyncRedisWrapper bound to `loop` (default: the running loop)."""
+	if loop is None:
+		loop = asyncio.get_running_loop()
+	key = (os.getpid(), loop)
+	client = _async_cache_clients.get(key)
+	if client is None:
+		with _async_cache_lock:
+			client = _async_cache_clients.get(key)
+			if client is None:
+				client = _async_cache_clients[key] = _make_async_cache_client()
+	return client
+
+
+def _make_async_cache_client() -> AsyncRedisWrapper:
+	if frappe.conf.redis_cache_sentinel_enabled:
+		sentinels = [tuple(node.split(":")) for node in frappe.conf.get("redis_cache_sentinels", [])]
+		sentinel = get_async_sentinel_connection(
+			sentinels=sentinels,
+			sentinel_username=frappe.conf.get("redis_cache_sentinel_username"),
+			sentinel_password=frappe.conf.get("redis_cache_sentinel_password"),
+			master_username=frappe.conf.get("redis_cache_master_username"),
+			master_password=frappe.conf.get("redis_cache_master_password"),
+		)
+		return sentinel.master_for(
+			frappe.conf.get("redis_cache_master_service"),
+			redis_class=AsyncRedisWrapper,
+		)
+
+	return AsyncRedisWrapper.from_url(frappe.conf.get("redis_cache"))
+
+
 def setup_cache() -> RedisWrapper:
 	if frappe.conf.redis_cache_sentinel_enabled:
 		sentinels = [tuple(node.split(":")) for node in frappe.conf.get("redis_cache_sentinels", [])]
@@ -392,6 +782,30 @@ def get_sentinel_connection(
 	master_password=None,
 ):
 	from redis.sentinel import Sentinel
+
+	sentinel_kwargs = {}
+	if sentinel_username:
+		sentinel_kwargs["username"] = sentinel_username
+
+	if sentinel_password:
+		sentinel_kwargs["password"] = sentinel_password
+
+	return Sentinel(
+		sentinels=sentinels,
+		sentinel_kwargs=sentinel_kwargs,
+		username=master_username,
+		password=master_password,
+	)
+
+
+def get_async_sentinel_connection(
+	sentinels: list[tuple[str, int]],
+	sentinel_username=None,
+	sentinel_password=None,
+	master_username=None,
+	master_password=None,
+):
+	from redis.asyncio.sentinel import Sentinel
 
 	sentinel_kwargs = {}
 	if sentinel_username:

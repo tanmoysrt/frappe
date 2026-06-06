@@ -20,7 +20,10 @@ facade on the loop gets an immediate exception instead of silently blocking
 the whole process.
 """
 
+import asyncio
 import inspect
+import os
+import threading
 from functools import partial
 
 from asgiref.sync import async_to_sync, sync_to_async
@@ -77,3 +80,54 @@ def dispatch_sync(handler, *args, **kwargs):
 	if is_async_callable(handler):
 		return async_to_sync(dispatch)(handler, *args, **kwargs)
 	return handler(*args, **kwargs)
+
+
+# --- sync→async bridge for loop-bound clients (Phase 3+) ---------------------
+#
+# async_to_sync with no loop around runs each call in a brand-new one-shot
+# loop. Async clients (redis.asyncio, later aiomysql/aiosqlite) bind their
+# pooled connections to the loop they were created on, so the second call
+# from CLI/bench/patches hits a connection from a dead loop ("Event loop is
+# closed"). The bridge below is one persistent loop in a daemon thread —
+# every sync caller in the process funnels through it, so the client's
+# connection pool lives on exactly one loop, forever.
+
+_bridge = {"loop": None, "pid": None}
+_bridge_lock = threading.Lock()
+
+
+def get_bridge_loop() -> asyncio.AbstractEventLoop:
+	"""Return the process-wide bridge loop, starting it on first use.
+
+	Fork-safe: threads don't survive fork, so a child process (RQ worker)
+	gets a fresh loop instead of submitting to a dead one.
+	"""
+	if _bridge["loop"] is None or _bridge["pid"] != os.getpid():
+		with _bridge_lock:
+			if _bridge["loop"] is None or _bridge["pid"] != os.getpid():
+				loop = asyncio.new_event_loop()
+				threading.Thread(
+					target=loop.run_forever, name="frappe-bridge-loop", daemon=True
+				).start()
+				_bridge["loop"] = loop
+				_bridge["pid"] = os.getpid()
+	return _bridge["loop"]
+
+
+def run_coroutine_sync(coro):
+	"""Run ``coro`` on the bridge loop and block for its result.
+
+	The coroutine runs in the caller's contextvars Context (captured by
+	``call_soon_threadsafe``), so ``frappe.local`` is the same dict on both
+	sides. Fail-fast guard: calling this from a loop thread would block that
+	loop — raise instead, same contract as ``async_to_sync``.
+	"""
+	try:
+		asyncio.get_running_loop()
+	except RuntimeError:
+		return asyncio.run_coroutine_threadsafe(coro, get_bridge_loop()).result()
+
+	coro.close()
+	raise RuntimeError(
+		"run_coroutine_sync called from an event loop thread - await the async API instead."
+	)
