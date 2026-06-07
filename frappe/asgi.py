@@ -337,14 +337,19 @@ def _finish_request(state):
 
 
 def serve(port=None, site=None, sites_path=".", proxy=False):
-	"""Programmatic uvicorn server — the framework-owned replacement for the
-	gunicorn / werkzeug run_simple paths (Phase 20). `bench serve` lands here;
-	bench-root app.py adds malloc tuning + re-exec on top of the same core.
+	"""Programmatic uvicorn server — the framework-owned light-mode runtime and
+	the `bench serve` target (Phase 20; Phase 25 folded the bench-root app.py
+	memory tuning — sized pool, idle malloc_trim, post-warmup gc.freeze — in
+	here). Bench-root app.py is now only the frappe-free malloc/GIL re-exec
+	shim that calls this; the re-exec has to stay out of the frappe package
+	because the allocator env must be set before any `import frappe`.
 
-	Knobs (common config, env override): asgi_pool_size / FRAPPE_POOL_SIZE,
-	asgi_limit_concurrency / FRAPPE_LIMIT_CONCURRENCY, webserver_port /
-	FRAPPE_PORT, asgi_thread_stack / FRAPPE_THREAD_STACK.
+	Knobs — sites/common_site_config.json only (no env vars): asgi_pool_size,
+	asgi_limit_concurrency, webserver_port, asgi_thread_stack,
+	malloc_trim_interval, loop_debug, log_level.
 	"""
+	import ctypes
+	import gc
 	import threading
 	from concurrent.futures import ThreadPoolExecutor
 
@@ -359,16 +364,61 @@ def serve(port=None, site=None, sites_path=".", proxy=False):
 	if proxy:
 		os.environ["USE_PROXY"] = "1"
 
-	def knob(key, default, env):
-		value = os.environ.get(env)
-		if value is None:
-			value = frappe.get_common_site_config(sites_path).get(key)
+	conf = frappe.get_common_site_config(sites_path)
+
+	def knob(key, default):
+		value = conf.get(key)
 		return int(value) if value is not None else default
 
-	pool_size = knob("asgi_pool_size", 2 * (os.cpu_count() or 1), "FRAPPE_POOL_SIZE")
-	limit_concurrency = knob("asgi_limit_concurrency", 4 * pool_size, "FRAPPE_LIMIT_CONCURRENCY")
-	port = int(port) if port else knob("webserver_port", 8000, "FRAPPE_PORT")
-	thread_stack = knob("asgi_thread_stack", 512 * 1024, "FRAPPE_THREAD_STACK")
+	cpu = os.cpu_count() or 1
+	is_gil_enabled = getattr(sys, "_is_gil_enabled", None)
+	gil_disabled = is_gil_enabled is not None and not is_gil_enabled()
+	# GIL build: 2 x CPU overlaps I/O waits. Free-threaded (Phase 23): threads
+	# run truly parallel, so ~CPU-sized pool avoids CPU oversubscription.
+	default_pool = cpu if gil_disabled else 2 * cpu
+	# Phase 24.10 lean default: the smallest backend set (sqlite main DB +
+	# in-process cache + sqlite queue) has no external I/O to overlap, so a
+	# CPU-sized pool is just wasted thread stacks — cap it small.
+	lean = (
+		conf.get("db_type") == "sqlite"
+		and conf.get("cache_backend") in (None, "", "memory")
+		and conf.get("queue_backend") in (None, "", "sqlite")
+	)
+	if lean:
+		default_pool = min(default_pool, 4)
+
+	pool_size = knob("asgi_pool_size", default_pool)
+	# In-flight cap on CPU, not pool: no-GIL shrinks the pool but serves far
+	# more rps, so a pool-derived cap would shed valid load as 503s under burst.
+	limit_concurrency = knob("asgi_limit_concurrency", 8 * cpu)
+	port = int(port) if port else knob("webserver_port", 8001)
+	thread_stack = knob("asgi_thread_stack", 512 * 1024)
+	trim_interval = knob("malloc_trim_interval", 30)
+
+	async def _idle_trim():
+		"""Replaces gunicorn max_requests recycling: release freed pages back to
+		the OS so heap fragmentation doesn't accumulate in a process that runs
+		for weeks. malloc_trim(0) is a glibc API, a no-op under tcmalloc."""
+		try:
+			libc = ctypes.CDLL("libc.so.6")
+		except OSError:
+			libc = None
+		warmed_up = False
+		while True:
+			await asyncio.sleep(trim_interval)
+			gc.collect()
+			# Phase 24.7: one-shot freeze after the first warmup cycle — by now
+			# the initial requests have populated meta/controllers; move that
+			# now-stable graph out of GC scanning too (lifespan startup already
+			# froze the import graph + preloaded drivers). Cumulative, no-GIL safe.
+			if not warmed_up:
+				gc.freeze()
+				warmed_up = True
+			if libc is not None:
+				try:
+					libc.malloc_trim(0)
+				except Exception:
+					pass
 
 	async def _main():
 		loop = asyncio.get_running_loop()
@@ -378,6 +428,18 @@ def serve(port=None, site=None, sites_path=".", proxy=False):
 			ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="frappe_sync")
 		)
 		threading.stack_size(0)
+		gil_status = "unknown" if is_gil_enabled is None else ("disabled" if gil_disabled else "enabled")
+		print(
+			f"frappe ASGI boot: pool={pool_size}, limit_concurrency={limit_concurrency}, "
+			f"port={port}, gil={gil_status}",
+			file=sys.stderr,
+		)
+		if conf.get("loop_debug"):
+			# dev: with one loop a blocking call stalls the whole process — log
+			# any callback/step that holds it too long
+			loop.set_debug(True)
+			loop.slow_callback_duration = 0.1
+		trim_task = asyncio.ensure_future(_idle_trim())
 		config = uvicorn.Config(
 			"frappe.asgi:application",
 			host="0.0.0.0",
@@ -386,10 +448,13 @@ def serve(port=None, site=None, sites_path=".", proxy=False):
 			interface="asgi3",
 			lifespan="on",
 			limit_concurrency=limit_concurrency,
-			log_level=os.environ.get("FRAPPE_LOG_LEVEL", "info"),
+			log_level=conf.get("log_level", "info"),
 			access_log=False,
 		)
-		await uvicorn.Server(config).serve()
+		try:
+			await uvicorn.Server(config).serve()
+		finally:
+			trim_task.cancel()
 
 	asyncio.run(_main())
 
