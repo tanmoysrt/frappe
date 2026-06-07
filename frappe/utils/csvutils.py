@@ -40,6 +40,7 @@ def read_csv_content_from_attached_file(doc):
 
 
 def read_csv_content(fcontent, use_sniffer: bool = False):
+	frappe.utils.optional_feature("csv")  # Phase 24.2 off-switch (surface control)
 	if not isinstance(fcontent, str):
 		decoded = False
 		for encoding in FILE_ENCODING_OPTIONS:
@@ -117,6 +118,7 @@ def send_csv_to_client(args: str | dict[str, Any]):
 
 
 def to_csv(data):
+	frappe.utils.optional_feature("csv")  # Phase 24.2 off-switch (surface control)
 	writer = UnicodeWriter()
 	for row in data:
 		writer.writerow(row)

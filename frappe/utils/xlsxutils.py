@@ -1,17 +1,21 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
+
+# Phase 24.2: future-annotations turns the xlsxwriter.Workbook / Format type hints
+# into strings, so the heavy excel libs (openpyxl, xlrd, xlsxwriter) are imported
+# function-level (gated by `enable_excel`) instead of at module load.
+from __future__ import annotations
+
 import datetime
 import functools
 import re
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from io import BytesIO
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-import xlrd
-import xlsxwriter
-from openpyxl import load_workbook
-from xlsxwriter.format import Format
+if TYPE_CHECKING:
+	from xlsxwriter.format import Format
 
 import frappe
 from frappe import _
@@ -500,6 +504,9 @@ def make_xlsx(
 		BytesIO | None: BytesIO object containing the Excel file data if a new workbook was created, otherwise None
 
 	"""
+	frappe.utils.optional_feature("excel")  # Phase 24.2 off-switch; before xlsxwriter import
+	import xlsxwriter
+
 	column_widths = column_widths or []
 	styles = styles or {}
 
@@ -639,6 +646,9 @@ def read_xlsx_file_from_attached_file(file_url=None, fcontent=None, filepath=Non
 	else:
 		return
 
+	frappe.utils.optional_feature("excel")  # Phase 24.2 off-switch; before openpyxl import
+	from openpyxl import load_workbook
+
 	rows = []
 	wb1 = load_workbook(filename=filename, data_only=True)
 	ws1 = wb1.active
@@ -648,6 +658,9 @@ def read_xlsx_file_from_attached_file(file_url=None, fcontent=None, filepath=Non
 
 
 def read_xls_file_from_attached_file(content):
+	frappe.utils.optional_feature("excel")  # Phase 24.2 off-switch; before xlrd import
+	import xlrd
+
 	book = xlrd.open_workbook(file_contents=content)
 	sheets = book.sheets()
 	sheet = sheets[0]

@@ -1198,3 +1198,18 @@ def get_app_version(app_name: str) -> str:
 		return frappe.get_attr(app_name + ".__version__")
 	except Exception:
 		return "0.0.1"
+
+
+def optional_feature(name: str) -> None:
+	"""Phase 24.2: gate an optional, heavy-import feature so a memory-tight site
+	can shed it. Raises ValidationError if the operator disabled it via
+	common_site_config ``enable_<name>`` (default on — today's behavior). Call at
+	the feature entry point BEFORE the heavy import (bs4 / num2words / openpyxl)
+	so the module is never loaded when the feature is off."""
+	if not frappe.get_common_conf(f"enable_{name}", True):
+		frappe.throw(
+			frappe._("Feature '{0}' is disabled on this site (common_site_config: enable_{0}).").format(
+				name
+			),
+			frappe.ValidationError,
+		)

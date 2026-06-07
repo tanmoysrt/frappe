@@ -1578,6 +1578,9 @@ def money_in_words(
 #
 def in_words(integer: int, in_million=True) -> str:
 	"""Return string in words for the given integer."""
+	from frappe.utils import optional_feature
+
+	optional_feature("number_to_words")  # Phase 24.2 off-switch; before num2words import
 	from num2words import num2words
 
 	locale = "en_IN" if not in_million else frappe.local.lang

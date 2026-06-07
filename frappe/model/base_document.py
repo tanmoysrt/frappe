@@ -1365,7 +1365,7 @@ class BaseDocument:
 
 		- Ignore if 'Ignore XSS Filter' is checked or fieldtype is 'Code'
 		"""
-		from bs4 import BeautifulSoup
+		from frappe.utils.html_utils import has_html_tag
 
 		if frappe.flags.in_install:
 			return
@@ -1380,7 +1380,7 @@ class BaseDocument:
 				# doesn't look like html so no need
 				continue
 
-			elif "<!-- markdown -->" in value and not bool(BeautifulSoup(value, "html.parser").find()):
+			elif "<!-- markdown -->" in value and not has_html_tag(value):
 				# should be handled separately via the markdown converter function
 				continue
 

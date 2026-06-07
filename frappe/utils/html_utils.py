@@ -134,6 +134,7 @@ def clean_script_and_style(html):
 	Remove script and style tags.
 	DEPRECATED: prefer nh3.clean's clean_content_tags parameter.
 	"""
+	frappe.utils.optional_feature("html_parsing")  # Phase 24.2 off-switch; before bs4 import
 
 	from bs4 import BeautifulSoup
 
@@ -143,6 +144,18 @@ def clean_script_and_style(html):
 	return frappe.as_unicode(soup)
 
 
+# Phase 24.3: cheap "does this string contain an HTML tag" test. Replaces
+# BeautifulSoup(...).find() used purely as a boolean — a tag-presence scan
+# answers "is there markup" without importing bs4 on the hot document-write path.
+# Real parsing/cleaning (communication, notifications, pdf, search) still uses bs4.
+_HTML_TAG_RE = re.compile(r"<[a-zA-Z!/]")
+
+
+def has_html_tag(text) -> bool:
+	"""True if `text` looks like it contains an HTML/markup tag."""
+	return isinstance(text, str) and bool(_HTML_TAG_RE.search(text))
+
+
 def sanitize_html(html, linkify=False, always_sanitize=False, disallowed_tags=None):
 	"""
 	Sanitize HTML tags, attributes and style to prevent XSS attacks
@@ -150,8 +163,6 @@ def sanitize_html(html, linkify=False, always_sanitize=False, disallowed_tags=No
 
 	Does not sanitize JSON unless explicitly specified, as it could lead to future problems
 	"""
-	from bs4 import BeautifulSoup
-
 	if not isinstance(html, str):
 		return html
 
@@ -159,7 +170,7 @@ def sanitize_html(html, linkify=False, always_sanitize=False, disallowed_tags=No
 		if is_json(html):
 			return html
 
-		if not bool(BeautifulSoup(html, "html.parser").find()):
+		if not has_html_tag(html):
 			return html
 
 	tags = (
