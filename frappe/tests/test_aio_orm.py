@@ -68,6 +68,82 @@ class TestAioWritePath(AsyncIntegrationTestCase):
 		await doc.aio.delete()
 
 
+async def async_doc_event(doc, method):
+	"""doc_events handler used by TestAioLifecycle (resolved by dotted path)."""
+	doc.flags.aio_doc_event = await frappe.db.aio.count("User")
+
+
+class TestAioLifecycle(AsyncIntegrationTestCase):
+	"""Phase 17: submit/cancel via doc.aio, async doc_events hooks, and
+	deadlock-free sync/async ORM mixing in one request."""
+
+	async def test_submit_cancel_with_async_hook(self):
+		from asgiref.sync import sync_to_async
+
+		from frappe.core.doctype.doctype.test_doctype import new_doctype
+
+		dt = await sync_to_async(lambda: new_doctype(is_submittable=1).insert(), thread_sensitive=False)()
+		self.addAsyncCleanup(sync_to_async(dt.delete, thread_sensitive=False))
+
+		seen = {}
+
+		async def on_submit_hook():
+			# nested facade-in-facade: doc.aio.submit holds the lock,
+			# this hook takes it again from another pool thread
+			seen["admin"] = await frappe.aio.get_value("User", "Administrator", "name")
+
+		doc = await frappe.aio.new_doc(dt.name)
+		doc.some_fieldname = "phase17"
+		doc.on_submit = on_submit_hook
+		await doc.aio.insert()
+		await asyncio.wait_for(doc.aio.submit(), timeout=30)
+		self.assertEqual(doc.docstatus, 1)
+		self.assertEqual(seen["admin"], "Administrator")
+
+		await doc.aio.cancel()
+		self.assertEqual(doc.docstatus, 2)
+		await doc.aio.delete()
+
+	async def test_async_doc_event_hook(self):
+		self.addCleanup(setattr, frappe.local, "doc_events_hooks", None)
+		with self.patch_hooks(
+			{"doc_events": {"ToDo": {"after_insert": ["frappe.tests.test_aio_orm.async_doc_event"]}}}
+		):
+			frappe.local.doc_events_hooks = None  # bust the per-request cache
+			doc = await frappe.aio.new_doc("ToDo")
+			doc.description = "phase17 doc_event"
+			await asyncio.wait_for(doc.aio.insert(), timeout=30)
+			self.assertGreaterEqual(doc.flags.aio_doc_event, 2)
+			await doc.aio.delete()
+
+	async def test_nested_sync_async_mixing_no_deadlock(self):
+		"""async facade -> async hook -> sync ORM -> async hook again —
+		the worst realistic interleaving of both APIs in one request."""
+		from asgiref.sync import sync_to_async
+
+		seen = {}
+
+		async def inner_hook():
+			seen["count"] = await frappe.db.aio.count("User")
+
+		def middle():
+			d2 = frappe.new_doc("ToDo")
+			d2.description = "phase17 inner"
+			d2.before_insert = inner_hook
+			d2.insert()
+			d2.delete()
+
+		async def outer_hook():
+			await sync_to_async(middle, thread_sensitive=False)()
+
+		doc = await frappe.aio.new_doc("ToDo")
+		doc.description = "phase17 outer"
+		doc.before_insert = outer_hook
+		await asyncio.wait_for(doc.aio.insert(), timeout=30)
+		self.assertGreaterEqual(seen["count"], 2)
+		await doc.aio.delete()
+
+
 class TestAsyncControllerSyncPath(IntegrationTestCase):
 	"""Async controller methods also work on the plain sync ORM path
 	(pool-thread requests, CLI) — dispatch_sync bridges them."""

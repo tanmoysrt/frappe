@@ -1981,7 +1981,9 @@ class Document(BaseDocument):
 				for f in hooks:
 					try:
 						frappe.db._disable_transaction_control += 1
-						add_to_return_value(self, f(self, method, *args, **kwargs))
+						# doc_events hooks may be async def — bridged via
+						# dispatch_hook; sync hooks run inline (Phase 17)
+						add_to_return_value(self, dispatch_hook(f, self, method, *args, **kwargs))
 					finally:
 						frappe.db._disable_transaction_control -= 1
 

@@ -20,18 +20,35 @@ from asgiref.sync import sync_to_async
 import frappe
 
 
+def _locked_call(fn, args, kwargs):
+	"""Run ``fn`` under the per-Database serialization lock (when a request
+	connection exists) — the gather-safety contract shared with db.aio."""
+	db = getattr(frappe.local, "db", None)
+	if db is None:
+		return fn(*args, **kwargs)
+	with db.aio._lock:
+		return fn(*args, **kwargs)
+
+
 def _awaitable(name):
 	"""Awaitable wrapper for the ``frappe.<name>`` sync ORM function."""
 
 	def call(*args, **kwargs):
-		fn = getattr(frappe, name)
-		db = getattr(frappe.local, "db", None)
-		if db is None:
-			return fn(*args, **kwargs)
-		with db.aio._lock:
-			return fn(*args, **kwargs)
+		return _locked_call(getattr(frappe, name), args, kwargs)
 
 	call.__name__ = call.__qualname__ = name
+	return sync_to_async(call, thread_sensitive=False)
+
+
+def _awaitable_path(path):
+	"""Awaitable wrapper for a dotted-path sync function (resolved at call
+	time, inside the pool thread's request context)."""
+
+	def call(*args, **kwargs):
+		return _locked_call(frappe.get_attr(path), args, kwargs)
+
+	call.__module__, _, call.__qualname__ = path.rpartition(".")
+	call.__name__ = call.__qualname__
 	return sync_to_async(call, thread_sensitive=False)
 
 
@@ -52,6 +69,9 @@ new_doc = _awaitable("new_doc")
 delete_doc = _awaitable("delete_doc")
 rename_doc = _awaitable("rename_doc")
 
+# lifecycle (Phase 17) — submit/cancel live on doc.aio; workflow transitions:
+apply_workflow = _awaitable_path("frappe.model.workflow.apply_workflow")
+
 
 class AsyncDocumentFacade:
 	"""Awaitable view of a Document: ``await doc.aio.save()``.
@@ -71,11 +91,7 @@ class AsyncDocumentFacade:
 			return attr
 
 		def call(*args, **kwargs):
-			db = getattr(frappe.local, "db", None)
-			if db is None:
-				return attr(*args, **kwargs)
-			with db.aio._lock:
-				return attr(*args, **kwargs)
+			return _locked_call(attr, args, kwargs)
 
 		call.__name__ = call.__qualname__ = name
 		return sync_to_async(call, thread_sensitive=False)
