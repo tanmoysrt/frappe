@@ -2,7 +2,7 @@ import time
 from contextlib import suppress
 from typing import Any
 
-from orjson import JSONDecodeError
+from msgspec import DecodeError as JSONDecodeError
 
 import frappe
 from frappe.utils import get_request_session

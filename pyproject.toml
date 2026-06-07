@@ -45,7 +45,9 @@ dependencies = [
     "oauthlib~=3.3.1",
     "openpyxl~=3.1.5",
     "xlsxwriter~=3.2.9",
-    "orjson~=3.11.5",
+    # msgspec replaced orjson (Phase 23): orjson has no free-threaded
+    # cp314t wheel; msgspec declares free-threaded support, same strict JSON
+    "msgspec~=0.21.1",
     "passlib~=1.7.4",
     "pdfkit~=1.0.0",
     "phonenumbers~=9.0.21",

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 from uuid import UUID
 
-import orjson
+import msgspec.json
 
 
 import frappe
@@ -196,15 +196,15 @@ def _make_logs_v1():
 	if frappe.error_log and is_traceback_allowed():
 		if source := guess_exception_source(frappe.local.error_log and frappe.local.error_log[0]["exc"]):
 			response["_exc_source"] = source
-		response["exc"] = orjson.dumps([frappe.utils.cstr(d["exc"]) for d in frappe.local.error_log]).decode()
+		response["exc"] = msgspec.json.encode([frappe.utils.cstr(d["exc"]) for d in frappe.local.error_log]).decode()
 
 	if frappe.local.message_log:
-		response["_server_messages"] = orjson.dumps(
-			[orjson.dumps(d).decode() for d in frappe.local.message_log]
+		response["_server_messages"] = msgspec.json.encode(
+			[msgspec.json.encode(d).decode() for d in frappe.local.message_log]
 		).decode()
 
 	if frappe.debug_log and is_traceback_allowed():
-		response["_debug_messages"] = orjson.dumps(frappe.local.debug_log).decode()
+		response["_debug_messages"] = msgspec.json.encode(frappe.local.debug_log).decode()
 
 	if frappe.flags.error_message:
 		response["_error_message"] = frappe.flags.error_message

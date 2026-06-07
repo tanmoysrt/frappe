@@ -16,7 +16,7 @@ import mimetypes
 import secrets
 from urllib.parse import urlencode
 
-import orjson
+import msgspec.json
 
 from frappe.http import Headers, Request, Response, parse_cookie_header
 
@@ -57,8 +57,8 @@ class TestResponse:
 	@property
 	def json(self):
 		try:
-			return orjson.loads(self.data)
-		except orjson.JSONDecodeError:
+			return msgspec.json.decode(self.data)
+		except msgspec.DecodeError:
 			return None
 
 	@property
@@ -131,7 +131,7 @@ class Client:
 				query_string = parts.query
 
 		if json is not None:
-			body = orjson.dumps(json)
+			body = msgspec.json.encode(json)
 			hdrs.set("Content-Type", "application/json")
 		elif isinstance(data, dict):
 			if any(isinstance(v, tuple) or hasattr(v, "read") for v in data.values()):

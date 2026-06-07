@@ -3,7 +3,7 @@
 import hashlib
 import os
 
-import orjson
+import msgspec.json
 
 import frappe
 from frappe.model.base_document import get_controller
@@ -174,7 +174,7 @@ def read_doc_from_file(path):
 	if os.path.exists(path):
 		with open(path) as f:
 			try:
-				doc = orjson.loads(f.read())
+				doc = msgspec.json.decode(f.read())
 			except ValueError:
 				print(f"bad json: {path}")
 				raise

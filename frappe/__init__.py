@@ -24,7 +24,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, Optional, TypeAlias, Union
 
-import orjson
+import msgspec.json
 from frappe.http import Headers
 
 import frappe
@@ -922,7 +922,7 @@ def get_installed_apps(*, _ensure_on_bench: bool = False) -> list[str]:
 	if not db:
 		connect()
 
-	installed = orjson.loads(db.get_global("installed_apps") or "[]")
+	installed = msgspec.json.decode(db.get_global("installed_apps") or "[]")
 
 	if _ensure_on_bench:
 		all_apps = cache.get_value("all_apps", get_all_apps)

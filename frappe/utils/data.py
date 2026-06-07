@@ -19,7 +19,7 @@ from typing import Any, Literal, Optional, TypeVar
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import orjson
+import msgspec.json
 from click import secho
 from dateutil import parser
 from dateutil.parser import ParserError
@@ -82,16 +82,6 @@ URL_NOTATION_PATTERN = re.compile(
 DURATION_PATTERN = re.compile(r"^(?:(\d+d)?((^|\s)\d+h)?((^|\s)\d+m)?((^|\s)\d+s)?)$")
 HTML_TAG_PATTERN = re.compile("<[^>]+>")
 MARIADB_SPECIFIC_COMMENT = re.compile(r"#.*")
-
-# these options are necessary to use orjson with frappe
-#
-# OPT_PASSTHROUGH_DATETIME allows datetime objects to be passed through
-# to the default function without conversion by orjson
-# frappe converts datetime objects differently (__str__) from orjson (RFC 3339)
-#
-# OPT_NON_STR_KEYS slightly reduces performance of orjson, but allows for non-string keys in dicts
-DEFAULT_ORJSON_OPTIONS = orjson.OPT_PASSTHROUGH_DATETIME | orjson.OPT_NON_STR_KEYS
-
 
 class Weekday(Enum):
 	Sunday = 0
@@ -2644,7 +2634,7 @@ def guess_date_format(date_string: str) -> str:
 
 def validate_json_string(string: str) -> None:
 	try:
-		orjson.loads(string)
+		msgspec.json.decode(string)
 	except (TypeError, ValueError):
 		raise frappe.ValidationError
 
@@ -2654,22 +2644,24 @@ def parse_json(val: str):
 	Parses json if string else return
 	"""
 	if isinstance(val, str):
-		val = orjson.loads(val)
+		val = msgspec.json.decode(val)
 	if isinstance(val, dict):
 		val = frappe._dict(val)
 	return val
 
 
 def orjson_dumps(obj, default=None, option=None, decode=True):
-	"""A wrapper around `orjson.dumps`, with some default options set"""
+	"""JSON-encode `obj` with msgspec.
 
-	if option is not None:
-		# user defined options are merged with the default options
-		option = option | DEFAULT_ORJSON_OPTIONS
+	With a `default` hook, stdlib json is used instead so the hook controls
+	datetime formatting (frappe emits str(), not RFC 3339) — msgspec encodes
+	datetimes natively and would bypass the hook. `option` is accepted for
+	backward compatibility with the orjson-era signature and ignored.
+	"""
+	if default is not None:
+		value = json.dumps(obj, default=default).encode()
 	else:
-		option = DEFAULT_ORJSON_OPTIONS
-
-	value = orjson.dumps(obj, default, option)
+		value = msgspec.json.encode(obj)
 	return value.decode() if decode else value
 
 

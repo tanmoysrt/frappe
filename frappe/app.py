@@ -4,7 +4,7 @@
 import functools
 import os
 
-import orjson
+import msgspec.json
 
 import frappe
 import frappe.api
@@ -334,8 +334,8 @@ def make_form_dict(request: Request):
 	request_data = request.get_data(as_text=True)
 	if request_data and request.is_json:
 		try:
-			args = orjson.loads(request_data)
-		except orjson.JSONDecodeError:
+			args = msgspec.json.decode(request_data)
+		except msgspec.DecodeError:
 			frappe.throw(_("Invalid request body"), frappe.DataError)
 	else:
 		args = {}

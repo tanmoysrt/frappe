@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from email.utils import format_datetime
 from urllib.parse import parse_qsl, quote, unquote
 
-import orjson
+import msgspec.json
 
 # -------------------------------------------------------------------------
 # datastructures
@@ -617,8 +617,8 @@ class Request:
 
 	def get_json(self, silent=False):
 		try:
-			return orjson.loads(self.get_data() or b"null")
-		except orjson.JSONDecodeError:
+			return msgspec.json.decode(self.get_data() or b"null")
+		except msgspec.DecodeError:
 			if silent:
 				return None
 			raise BadRequest("Invalid JSON body")
