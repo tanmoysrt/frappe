@@ -234,6 +234,15 @@ async def _lifespan(scope, receive, send):
 			from frappe import realtime_server
 
 			realtime_server.start()
+			# Phase 24.7: the import graph + the drivers just preloaded are
+			# permanent — move them out of GC scanning so gen2 collections stop
+			# walking (and dirtying the pages of) the framework's object graph.
+			# A second freeze after warmup (app.py _idle_trim) captures meta /
+			# controllers populated by the first requests. Safe under no-GIL.
+			import gc
+
+			gc.collect()
+			gc.freeze()
 			await send({"type": "lifespan.startup.complete"})
 		elif message["type"] == "lifespan.shutdown":
 			from frappe import realtime_server
