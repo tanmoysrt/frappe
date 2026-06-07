@@ -103,9 +103,10 @@ def emit_via_redis(event, message, room):
 	Phase 14: when the in-process python socket.io server is running (the
 	single-process light mode), the event goes straight onto its loop —
 	single process, single loop, every client connected here; no Redis
-	pub/sub hop. Out-of-process publishers (bench CLI, RQ workers) and the
-	`use_node_realtime` revert flag keep the Redis path — the in-process
-	subscriber (and Node) pick those up.
+	pub/sub hop. Out-of-process publishers (bench CLI, RQ workers) keep the
+	Redis path — the in-process subscriber picks those up. (Node.js realtime
+	was removed in Phase 18; `use_node_realtime` now only forces the Redis
+	path.)
 
 	:param event: Event name, like `task_progress` etc.
 	:param message: JSON message object. For async must contain `task_id`

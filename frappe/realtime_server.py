@@ -13,10 +13,9 @@ rooms, same event names, same auth semantics. Differences by design:
   (browsers always do; non-browser clients aren't forced to fake one).
 
 Mounted in frappe/asgi.py under /socket.io for both http (long-polling) and
-websocket scopes. An asyncio task subscribes to the same Redis "events"
-channel publish_realtime writes to, so Python and Node serve identical
-events side by side; nothing switches until Phase 14. Node stays runnable
-throughout.
+websocket scopes. An asyncio task subscribes to the Redis "events" channel
+for out-of-process publishers (bench CLI, RQ workers). The Node.js realtime
+server this ports was removed in Phase 18.
 """
 
 import asyncio
