@@ -645,10 +645,13 @@ class InProcessClientCache:
 		return self.get_value(key, generator=lambda: frappe.get_doc(doctype, name))
 
 	def _store(self, key_bytes: bytes, val):
-		if len(self.cache) >= self.maxsize:
-			with self.lock:
-				self.cache.pop(next(iter(self.cache), None), None)
+		# Phase 24.8: evict + insert under ONE lock. The previous split (check
+		# length outside the lock, pop inside, then re-acquire to insert) was a
+		# check-then-act race under free-threading — two threads could both miss
+		# the cap and grow it past maxsize, or pop more than intended.
 		with self.lock:
+			while len(self.cache) >= self.maxsize:
+				self.cache.pop(next(iter(self.cache), None), None)
 			self.cache[key_bytes] = self.CachedValue(value=val, expiry=time.monotonic() + self.local_ttl)
 
 	def delete_value(self, key, *, shared=False):
