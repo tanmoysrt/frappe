@@ -1545,6 +1545,20 @@ def ping():
 	return "pong"
 
 
+@whitelist(allow_guest=True)
+def cpu_burn(rounds: int = 1):
+	"""CPU-bound no-op for Phase 23 benchmarking. A fixed pure-Python loop
+	holds the interpreter per request: under the GIL the thread pool runs
+	this one-core-at-a-time, so throughput is flat regardless of pool size;
+	on a free-threaded build pool threads run in parallel and throughput
+	scales with cores. Capped so it can't be abused as a CPU sink."""
+	total = 0
+	for _round in range(min(int(rounds), 50)):
+		for i in range(200_000):
+			total += i * i
+	return total
+
+
 def validate_and_sanitize_search_inputs(fn):
 	@functools.wraps(fn)
 	def wrapper(*args, **kwargs):
