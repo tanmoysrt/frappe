@@ -53,12 +53,18 @@ _wsgi_app = _build_wsgi_app()
 
 
 async def application(scope, receive, send):
-	if scope["type"] == "http":
+	# socket.io (Phase 13): /socket.io long-polling + websocket, same loop.
+	# Lazy import keeps the HTTP path bootable without python-socketio.
+	if scope["type"] in ("http", "websocket") and scope["path"].startswith("/socket.io"):
+		from frappe import realtime_server
+
+		await realtime_server.application(scope, receive, send)
+	elif scope["type"] == "http":
 		await _handle_http(scope, receive, send)
 	elif scope["type"] == "lifespan":
 		await _lifespan(scope, receive, send)
 	elif scope["type"] == "websocket":
-		# no websockets in this process yet — socket.io is still the Node proc
+		# non-socket.io websockets: unsupported
 		await receive()
 		await send({"type": "websocket.close"})
 
@@ -78,10 +84,16 @@ async def _lifespan(scope, receive, send):
 			# in-process scheduler tick (Phase 11); cross-process FileLock +
 			# `in_process_scheduler: 0` config flip keep `bench schedule` viable
 			scheduler.start_scheduler_task()
+			# python socket.io events subscriber (Phase 13)
+			from frappe import realtime_server
+
+			realtime_server.start()
 			await send({"type": "lifespan.startup.complete"})
 		elif message["type"] == "lifespan.shutdown":
+			from frappe import realtime_server
 			from frappe.utils import scheduler, sqlite_queue
 
+			await realtime_server.stop()
 			await scheduler.stop_scheduler_task()
 			await sqlite_queue.stop_workers()
 			# close per-site DB pools (Phase 6); they live on the bridge
