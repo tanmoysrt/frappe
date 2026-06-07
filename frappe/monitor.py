@@ -7,8 +7,6 @@ import os
 import traceback
 import uuid
 
-import rq
-
 import frappe
 from frappe.utils.data import cint
 from frappe.utils.synchronization import filelock
@@ -82,6 +80,8 @@ class Monitor:
 		if "run_scheduled_job" in method:
 			self.data.job.method = kwargs["job_type"]
 			self.data.job.scheduled = True
+
+		import rq
 
 		if job := rq.get_current_job():
 			self.data.job_id = job.id

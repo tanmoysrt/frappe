@@ -1610,7 +1610,11 @@ from frappe.model.meta import get_meta
 import frappe.aio as aio  # awaitable ORM facade: await frappe.aio.get_doc(...)
 from frappe.realtime import publish_progress, publish_realtime
 from frappe.utils import get_traceback, mock, parse_json, safe_eval, create_folder
-from frappe.utils.background_jobs import enqueue, enqueue_doc
+
+# Phase 24.1: `enqueue` / `enqueue_doc` live in background_jobs, which top-imports
+# rq + redis. They are exposed lazily via module __getattr__ (PEP 562) at the end
+# of this file, keeping rq and redis off the `import frappe` path — a sqlite-queue
+# light site never pulls them.
 from frappe.utils.task_queue import enqueue_task, get_current_task
 from frappe.utils.error import log_error
 from frappe.utils.formatters import format_value
@@ -1624,3 +1628,30 @@ delete_doc_if_exists = delete_doc
 
 frappe._optimizations.optimize_all()
 frappe._optimizations.register_fault_handler()
+
+
+# Phase 24.1: lazy backend accessors. Names that pull rq/redis are resolved on
+# first attribute access instead of at `import frappe`, so a light site on the
+# sqlite queue + in-process cache never imports them.
+_LAZY_ATTRS = {
+	"enqueue": ("frappe.utils.background_jobs", "enqueue"),
+	"enqueue_doc": ("frappe.utils.background_jobs", "enqueue_doc"),
+}
+
+
+def __getattr__(name):
+	target = _LAZY_ATTRS.get(name)
+	if target is None:
+		raise AttributeError(f"module 'frappe' has no attribute {name!r}")
+	# Off-switch for memory-tight sites: never pull rq/redis, even on demand.
+	if get_common_conf("disable_rq"):
+		raise AttributeError(
+			f"frappe.{name} unavailable: rq/redis disabled via common_site_config "
+			"'disable_rq'. Unset it to use the RQ background-job backend."
+		)
+	import importlib
+
+	module_name, attr = target
+	value = getattr(importlib.import_module(module_name), attr)
+	globals()[name] = value  # cache: subsequent access skips __getattr__
+	return value

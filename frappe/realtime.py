@@ -3,8 +3,6 @@
 
 from contextlib import suppress
 
-import redis
-
 import frappe
 from frappe.utils.data import cstr
 
@@ -120,6 +118,8 @@ def emit_via_redis(event, message, room):
 			realtime_server.emit_threadsafe(event, message, room, frappe.local.site)
 			return
 
+	import redis
+
 	from frappe.utils.background_jobs import get_redis_connection_without_auth
 
 	with suppress(redis.exceptions.ConnectionError):
@@ -145,6 +145,8 @@ def get_socketio_secret():
 	"""Generate socket.io secret, stored in queue redis (heavy mode) or the
 	in-process cache (light mode, Phase 21 — no redis running at all; the
 	only realtime server lives in this same process)."""
+
+	import redis
 
 	from frappe.utils.background_jobs import get_redis_connection_without_auth
 

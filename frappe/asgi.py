@@ -216,6 +216,12 @@ async def _lifespan(scope, receive, send):
 			# fail-fast guard (Phase 8): a sync frappe.db call on this thread
 			# would block the whole process — Database.sql raises instead
 			frappe.dispatch.register_loop_thread()
+			# Phase 24.1: warm ONLY the backend drivers this config uses, so
+			# they are import-locked here (boot) not on the first hot request;
+			# unconfigured backends stay cold. (24.7 freezes these after warmup.)
+			from frappe.utils.preload import preload_configured_backends
+
+			preload_configured_backends()
 			# SQLite queue workers (Phase 9): asyncio tasks on this loop,
 			# idle-cheap when no site uses queue_backend "sqlite"
 			from frappe.utils import scheduler, sqlite_queue

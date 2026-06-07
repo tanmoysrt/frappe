@@ -5,8 +5,6 @@ import json
 import os
 import re
 
-import redis
-
 import frappe
 from frappe.model.base_document import get_controller
 from frappe.utils import cint, strip_html_tags
@@ -423,6 +421,8 @@ def sync_values(values: list):
 
 
 def sync_value_in_queue(value):
+	import redis
+
 	try:
 		# append to search queue if connected
 		frappe.cache.lpush("global_search_queue", json.dumps(value))
