@@ -1,13 +1,15 @@
 # Copyright (c) 2022, Frappe Technologies and contributors
 # For license information, please see license.txt
 
+# Phase 24.1/24.4: rq is imported function-level (future-annotations frees the
+# Job/Queue type hints) so a light site on the sqlite queue never pulls rq just
+# to open the RQ Job list. When queue_backend == "sqlite", get_list/load_from_db
+# read the sqlite `jobs` table instead of redis.
+from __future__ import annotations
+
 import functools
 import re
-
-from rq.command import send_stop_job_command
-from rq.exceptions import InvalidJobOperation, NoSuchJobError
-from rq.job import Job
-from rq.queue import Queue
+from typing import TYPE_CHECKING
 
 import frappe
 from frappe import _
@@ -17,18 +19,38 @@ from frappe.utils import (
 	compare,
 	convert_utc_to_system_timezone,
 	create_batch,
+	get_datetime,
 	make_filter_dict,
 )
-from frappe.utils.background_jobs import get_queues, get_redis_conn
+
+if TYPE_CHECKING:
+	from rq.job import Job
+	from rq.queue import Queue
 
 QUEUES = ["default", "long", "short"]
 JOB_STATUSES = ["queued", "started", "failed", "finished", "deferred", "scheduled", "canceled"]
+
+# sqlite `jobs` table only ever holds pending/running/failed (successful jobs are
+# deleted on completion); map those onto the RQ Job status vocabulary.
+SQLITE_STATUS_MAP = {"pending": "queued", "running": "started", "failed": "failed"}
+
+
+def _is_sqlite_queue() -> bool:
+	return frappe.get_common_conf("queue_backend") == "sqlite"
 
 
 def check_permissions(method):
 	@functools.wraps(method)
 	def wrapper(*args, **kwargs):
 		frappe.only_for("System Manager")
+		if _is_sqlite_queue():
+			# read-only on the sqlite queue (24.4); load_from_db already
+			# scoped the row to the current site.
+			frappe.msgprint(
+				_("Job actions are not available on the SQLite queue (read-only)."),
+				title=_("Not Supported"),
+			)
+			return
 		job = args[0].job
 		if not for_current_site(job):
 			raise frappe.PermissionError
@@ -62,6 +84,19 @@ class RQJob(Document):
 	# end: auto-generated types
 
 	def load_from_db(self):
+		if _is_sqlite_queue():
+			row = _sqlite_fetch_one(self.name)
+			if row is None:
+				raise frappe.DoesNotExistError
+			super(Document, self).__init__(serialize_sqlite_job(row))
+			self._job_obj = None
+			return
+
+		from rq.exceptions import NoSuchJobError
+		from rq.job import Job
+
+		from frappe.utils.background_jobs import get_redis_conn
+
 		try:
 			job = Job.fetch(self.name, connection=get_redis_conn())
 		except NoSuchJobError:
@@ -79,6 +114,13 @@ class RQJob(Document):
 
 	@staticmethod
 	def get_list(filters=None, start=0, page_length=20, order_by="creation desc"):
+		if _is_sqlite_queue():
+			return _sqlite_get_list(filters, start, page_length, order_by)
+
+		from rq.job import Job
+
+		from frappe.utils.background_jobs import get_redis_conn
+
 		matched_job_ids = RQJob.get_matching_job_ids(filters=filters)[start : start + page_length]
 
 		conn = get_redis_conn()
@@ -89,6 +131,8 @@ class RQJob(Document):
 
 	@staticmethod
 	def get_matching_job_ids(filters) -> list[str]:
+		from frappe.utils.background_jobs import get_queues
+
 		filters = make_filter_dict(filters or [])
 
 		queues = _eval_filters(filters.get("queue"), QUEUES + get_custom_queues())
@@ -109,6 +153,11 @@ class RQJob(Document):
 
 	@check_permissions
 	def stop_job(self):
+		from rq.command import send_stop_job_command
+		from rq.exceptions import InvalidJobOperation
+
+		from frappe.utils.background_jobs import get_redis_conn
+
 		try:
 			send_stop_job_command(connection=get_redis_conn(), job_id=self.job_id)
 		except InvalidJobOperation:
@@ -126,6 +175,8 @@ class RQJob(Document):
 
 	@staticmethod
 	def get_count(filters=None) -> int:
+		if _is_sqlite_queue():
+			return len(_sqlite_get_list(filters, 0, 1_000_000, "creation desc"))
 		return len(RQJob.get_matching_job_ids(filters))
 
 	# None of these methods apply to virtual job doctype, overriden for sanity.
@@ -181,6 +232,101 @@ def serialize_job(job: Job) -> frappe._dict:
 	)
 
 
+def serialize_sqlite_job(row) -> frappe._dict:
+	"""Map a sqlite `jobs` row onto the RQ Job fields (24.4). Timestamps are
+	stored as UTC text; kwargs is the pickled queue_args dict (best-effort)."""
+	import pickle
+
+	status = SQLITE_STATUS_MAP.get(row["status"], row["status"])
+	job_name = row["func"]
+	user = None
+	arguments = ""
+	try:
+		queue_args = pickle.loads(row["kwargs"])
+		user = queue_args.get("user")
+		arguments = frappe.as_json(queue_args)
+		job_name = queue_args.get("job_name") or job_name
+	except Exception:
+		pass
+
+	def conv(text):
+		return convert_utc_to_system_timezone(get_datetime(text)) if text else ""
+
+	started = get_datetime(row["started_at"]) if row["started_at"] else None
+	ended = get_datetime(row["ended_at"]) if row["ended_at"] else None
+	time_taken = (ended - started).total_seconds() if (started and ended) else ""
+
+	return frappe._dict(
+		name=row["job_id"],
+		job_id=row["job_id"],
+		queue=row["queue"],
+		job_name=job_name,
+		status=status,
+		started_at=conv(row["started_at"]),
+		ended_at=conv(row["ended_at"]),
+		time_taken=time_taken,
+		exc_info=row["error"],
+		arguments=arguments,
+		timeout="",
+		creation=conv(row["enqueued_at"]),
+		modified=conv(row["ended_at"] or row["started_at"] or row["enqueued_at"]),
+		_comment_count=0,
+		owner=user,
+		modified_by=user,
+	)
+
+
+def _sqlite_conn():
+	from frappe.utils import sqlite_queue
+
+	return sqlite_queue._connect()
+
+
+def _sqlite_fetch_one(job_id: str):
+	conn = _sqlite_conn()
+	try:
+		return conn.execute(
+			"SELECT * FROM jobs WHERE site = ? AND job_id = ?",
+			(frappe.local.site, job_id),
+		).fetchone()
+	finally:
+		conn.close()
+
+
+def _sqlite_match(job: frappe._dict, filters) -> bool:
+	fd = make_filter_dict(filters or [])
+	for field in ("status", "queue", "job_id", "job_name"):
+		flt = fd.get(field)
+		if flt:
+			operator, operand = flt
+			if not compare(job.get(field), operator, operand):
+				return False
+	return True
+
+
+def _sqlite_get_list(filters=None, start=0, page_length=20, order_by="creation desc"):
+	conn = _sqlite_conn()
+	try:
+		rows = conn.execute(
+			"SELECT * FROM jobs WHERE site = ? ORDER BY id DESC", (frappe.local.site,)
+		).fetchall()
+	finally:
+		conn.close()
+
+	jobs = [serialize_sqlite_job(r) for r in rows]
+	jobs = [j for j in jobs if _sqlite_match(j, filters)]
+	jobs.sort(key=lambda j: j.creation or "", reverse="desc" in order_by)
+	return jobs[start : start + page_length]
+
+
+def _sqlite_remove_failed():
+	conn = _sqlite_conn()
+	try:
+		conn.execute("DELETE FROM jobs WHERE site = ? AND status = 'failed'", (frappe.local.site,))
+	finally:
+		conn.close()
+
+
 def for_current_site(job: Job) -> bool:
 	return job.kwargs.get("site") == frappe.local.site
 
@@ -199,6 +345,8 @@ def _eval_filters(filter, values: list[str]) -> list[str]:
 
 
 def fetch_job_ids(queue: Queue, status: str) -> list[str]:
+	from rq.queue import Queue
+
 	registry_map = {
 		"queued": queue,  # self
 		"started": queue.started_job_registry,
@@ -223,6 +371,14 @@ def fetch_job_ids(queue: Queue, status: str) -> list[str]:
 @frappe.whitelist()
 def remove_failed_jobs():
 	frappe.only_for("System Manager")
+	if _is_sqlite_queue():
+		_sqlite_remove_failed()
+		return
+
+	from rq.job import Job
+
+	from frappe.utils.background_jobs import get_queues, get_redis_conn
+
 	for queue in get_queues():
 		fail_registry = queue.failed_job_registry
 		failed_jobs = filter_current_site_jobs(fail_registry.get_job_ids(cleanup=False))
@@ -235,6 +391,8 @@ def remove_failed_jobs():
 
 
 def get_all_queued_jobs():
+	from frappe.utils.background_jobs import get_queues
+
 	jobs = []
 	for q in get_queues():
 		jobs.extend(q.get_jobs())
