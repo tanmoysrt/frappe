@@ -32,6 +32,7 @@ ARCHITECTURE_KEYS = (
 	"malloc_trim_interval",
 	"use_tcmalloc",
 	"webserver_port",
+	"free_threading",
 )
 
 # pinned by patch_common_conf during tests; checked first by get_common_conf

@@ -22,7 +22,8 @@ dependencies = [
     "PyMySQL==1.1.2",
     "pypdf==6.10.2",
     "PyPika @ git+https://github.com/frappe/pypika@2c50e6142b2d61d2d243e466fdd5dc03b3d918f2",
-    "mysqlclient==2.2.7",
+    # 2.2.8 declares free-threaded support (Phase 23); 2.2.7 re-enabled the GIL
+    "mysqlclient==2.2.8",
     "PyQRCode~=1.2.1",
     "PyYAML~=6.0.3",
     "RestrictedPython~=8.1",
@@ -53,7 +54,6 @@ dependencies = [
     "phonenumbers~=9.0.21",
     "premailer~=3.10.0",
     "psutil~=7.0.0",
-    "psycopg2-binary~=2.9.11",
     "pyOpenSSL~=26.0.0",
     "python-multipart~=0.0.32",
     "pydantic~=2.12.5",
@@ -113,6 +113,10 @@ Documentation = "https://docs.frappe.io/framework"
 # upstream while frappe needs redis~=7.1 — round-trip smoke-tested fine on
 # redis-py 7.x; install with --no-deps until the upstream pin is relaxed.
 arq = ["arq~=0.28.0"]
+# psycopg2 is lazily imported (database/postgres/database.py) and only
+# needed when a site uses db_type "postgres". It has no free-threaded
+# cp314t wheel (Phase 23), so it is opt-in rather than a core dependency.
+postgres = ["psycopg2-binary~=2.9.11"]
 dev = [
     "pyngrok~=7.5.0",
     "watchdog~=6.0.0",

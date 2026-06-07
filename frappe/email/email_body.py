@@ -467,7 +467,13 @@ def get_email_html(
 
 def inline_style_in_html(html, add_css=True):
 	"""Convert email.css and html to inline-styled html."""
-	from premailer import Premailer
+	try:
+		from premailer import Premailer
+	except ImportError:
+		# premailer needs lxml, which re-enables the GIL on free-threaded
+		# builds (Phase 23) and is left uninstalled there — emails go out
+		# without inlined styles instead of failing
+		return html
 
 	from frappe.utils.jinja_globals import bundled_asset
 
