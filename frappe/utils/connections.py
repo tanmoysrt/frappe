@@ -96,9 +96,18 @@ def check_redis(redis_services=None):
 	services = redis_services or REDIS_KEYS
 	status = {}
 	for srv in services:
+		if srv == "redis_cache" and _cache_backend_is_memory():
+			status[srv] = True  # Phase 21: in-process cache, no server needed
+			continue
 		url = urlparse(config[srv])
 		status[srv] = is_open(url.scheme, url.hostname, url.port, url.path)
 	return status
+
+
+def _cache_backend_is_memory() -> bool:
+	import frappe
+
+	return (frappe.get_common_conf("cache_backend") or "memory") != "redis"
 
 
 def check_connection(redis_services=None):

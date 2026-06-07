@@ -1,4 +1,6 @@
 import time
+import unittest
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -8,6 +10,29 @@ TEST_KEY = "42"
 
 
 class TestClientCache(IntegrationTestCase):
+	"""Phase 21: exercises the OPT-IN redis ClientCache (invalidation
+	protocol etc.) — the default backend is in-process now, so a real
+	redis stack is patched in (skipped when redis isn't running)."""
+
+	@classmethod
+	def setUpClass(cls):
+		from frappe.utils.redis_wrapper import setup_cache
+
+		redis_cache = setup_cache()
+		if not redis_cache.connected():
+			raise unittest.SkipTest("redis_cache not running — redis-backend tests skipped")
+		cls._cache_patch = patch.object(frappe, "cache", redis_cache)
+		cls._cache_patch.start()
+		cls._client_cache_patch = patch.object(frappe, "client_cache", ClientCache())
+		cls._client_cache_patch.start()
+		super().setUpClass()
+
+	@classmethod
+	def tearDownClass(cls):
+		super().tearDownClass()
+		cls._client_cache_patch.stop()
+		cls._cache_patch.stop()
+
 	def setUp(self) -> None:
 		frappe.client_cache.delete_value(TEST_KEY)
 		return super().setUp()

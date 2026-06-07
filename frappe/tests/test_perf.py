@@ -227,6 +227,8 @@ class TestPerformance(IntegrationTestCase):
 			redis_cached_func()
 
 	def test_idle_cpu_utilization_redis_pubsub(self):
+		if not hasattr(frappe.client_cache, "invalidator_thread"):
+			self.skipTest("memory cache backend — no redis pubsub invalidator (Phase 21)")
 		pid = frappe.client_cache.invalidator_thread.native_id
 		process = psutil.Process(pid)
 		self.assertLess(process.cpu_percent(interval=1.0), 2)

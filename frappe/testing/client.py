@@ -45,6 +45,12 @@ class TestResponse:
 	def location(self):
 		return self.headers.get("Location")
 
+	@property
+	def cache_control(self):
+		from frappe.http import RequestCacheControl
+
+		return RequestCacheControl(self.headers.get("Cache-Control"))
+
 	def get_data(self, as_text=False):
 		return self.text if as_text else self.data
 

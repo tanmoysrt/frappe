@@ -318,17 +318,28 @@ _redis_init_lock = threading.Lock()
 
 
 def setup_redis_cache_connection():
-	"""Defines `frappe.cache` as `RedisWrapper` instance"""
-	from frappe.utils.redis_wrapper import ClientCache, setup_cache
-
+	"""Define `frappe.cache` / `frappe.client_cache` for the configured
+	backend (Phase 21). Default "memory": in-process dicts, no redis process
+	needed — light mode. `cache_backend: "redis"` (common config) keeps the
+	classic wiring for multi-process deployments (RQ workers need a shared
+	cache)."""
 	global cache
 	global client_cache
 
 	with _redis_init_lock:
 		# We need to check again since someone else might have setup connection before us.
-		if not cache:
+		if cache:
+			return
+		if (get_common_conf("cache_backend") or "memory") == "redis":
+			from frappe.utils.redis_wrapper import ClientCache, setup_cache
+
 			cache = setup_cache()
 			client_cache = ClientCache()
+		else:
+			from frappe.utils.inprocess_cache import InProcessCache, InProcessClientCache
+
+			cache = InProcessCache()
+			client_cache = InProcessClientCache(cache)
 
 
 def errprint(msg: str) -> None:

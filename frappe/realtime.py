@@ -142,18 +142,27 @@ SOCKETIO_SECRET_KEY = "socketio_auth_secret"
 
 
 def get_socketio_secret():
-	"""Generate socket.io secret and store in redis"""
+	"""Generate socket.io secret, stored in queue redis (heavy mode) or the
+	in-process cache (light mode, Phase 21 — no redis running at all; the
+	only realtime server lives in this same process)."""
 
 	from frappe.utils.background_jobs import get_redis_connection_without_auth
 
-	r = get_redis_connection_without_auth()
-	secret = r.get(SOCKETIO_SECRET_KEY)
-	if secret:
-		return secret.decode()
+	try:
+		r = get_redis_connection_without_auth()
+		secret = r.get(SOCKETIO_SECRET_KEY)
+		if secret:
+			return secret.decode()
 
-	secret = frappe.generate_hash(length=32)
-	r.set(SOCKETIO_SECRET_KEY, secret)
-	return secret
+		secret = frappe.generate_hash(length=32)
+		r.set(SOCKETIO_SECRET_KEY, secret)
+		return secret
+	except redis.exceptions.ConnectionError:
+		secret = frappe.cache.get_value(SOCKETIO_SECRET_KEY, shared=True)
+		if not secret:
+			secret = frappe.generate_hash(length=32)
+			frappe.cache.set_value(SOCKETIO_SECRET_KEY, secret, shared=True)
+		return secret
 
 
 @frappe.whitelist(allow_guest=True)

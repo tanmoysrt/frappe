@@ -301,6 +301,11 @@ def clear_cache(user: str | None = None, doctype: str | None = None):
 		for fn in frappe.get_hooks("clear_cache"):
 			frappe.get_attr(fn)()
 
+		# memory backend (Phase 21): tell OTHER processes (the running web
+		# server) to flush their in-process cache via the bump-file
+		if bump_generation := getattr(frappe.cache, "bump_generation", None):
+			bump_generation()
+
 	if (not doctype and not user) or doctype == "DocType":
 		frappe.utils.caching._SITE_CACHE.clear()
 		frappe.client_cache.clear_cache()

@@ -359,7 +359,8 @@ class RequestCacheControl:
 				directives[key.lower().replace("-", "_")] = val.strip('"') or True
 		self.no_cache = bool(directives.get("no_cache"))
 		self.no_store = bool(directives.get("no_store"))
-		self.max_age = directives.get("max_age")
+		max_age = directives.get("max_age")
+		self.max_age = int(max_age) if isinstance(max_age, str) and max_age.isdigit() else max_age
 		self._directives = directives
 
 	def __getattr__(self, name):  # unknown directives -> None

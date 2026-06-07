@@ -274,6 +274,10 @@ class SiteMigration:
 				self.post_schema_updates()
 			finally:
 				self.tearDown()
+				# memory cache backend (Phase 21): a running web server must
+				# drop stale schema/meta after migrate
+				if bump_generation := getattr(frappe.cache, "bump_generation", None):
+					bump_generation()
 				frappe.destroy()
 
 

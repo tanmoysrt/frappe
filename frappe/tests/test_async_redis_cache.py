@@ -13,13 +13,39 @@ import threading
 
 from asgiref.sync import sync_to_async
 
+import unittest
+from unittest.mock import patch
+
 import frappe
 from frappe.dispatch import get_bridge_loop, run_coroutine_sync
 from frappe.tests import AsyncUnitTestCase, UnitTestCase
 from frappe.utils.redis_wrapper import AsyncRedisWrapper, get_async_cache
 
 
-class TestAsyncCacheOnLoop(AsyncUnitTestCase):
+class RedisBackendTestCase:
+	"""Phase 21: frappe.cache defaults to the in-process backend — these
+	tests exercise the OPT-IN redis backend, so they patch in a real
+	RedisWrapper (skipping when no redis server is running)."""
+
+	@classmethod
+	def setUpClass(cls):
+		from frappe.utils.redis_wrapper import setup_cache
+
+		redis_cache = setup_cache()
+		if not redis_cache.connected():
+			raise unittest.SkipTest("redis_cache not running — redis-backend tests skipped")
+		cls._redis_cache = redis_cache
+		cls._cache_patch = patch.object(frappe, "cache", redis_cache)
+		cls._cache_patch.start()
+		super().setUpClass()
+
+	@classmethod
+	def tearDownClass(cls):
+		super().tearDownClass()
+		cls._cache_patch.stop()
+
+
+class TestAsyncCacheOnLoop(RedisBackendTestCase, AsyncUnitTestCase):
 	async def test_aio_roundtrip(self):
 		aio = frappe.cache.aio
 		self.assertIsInstance(aio, AsyncRedisWrapper)
@@ -65,7 +91,7 @@ class TestAsyncCacheOnLoop(AsyncUnitTestCase):
 			run_coroutine_sync(asyncio.sleep(0))
 
 
-class TestBridgeLoopNoLoop(UnitTestCase):
+class TestBridgeLoopNoLoop(RedisBackendTestCase, UnitTestCase):
 	"""No event loop in the calling thread (CLI / bench / patches) — the
 	pattern the async DB phases will rely on."""
 
@@ -101,7 +127,7 @@ class TestBridgeLoopNoLoop(UnitTestCase):
 		run_coroutine_sync(self._bridge_client().delete_value("phase3:ctx"))
 
 
-class TestSyncClientUnchanged(AsyncUnitTestCase):
+class TestSyncClientUnchanged(RedisBackendTestCase, AsyncUnitTestCase):
 	"""Sync frappe.cache stays the plain sync client — and works from pool
 	threads exactly as before (server topology)."""
 
