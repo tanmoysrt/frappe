@@ -14,6 +14,8 @@ import json
 import operator
 import os
 import re
+import threading
+from collections import OrderedDict
 from contextlib import contextmanager, suppress
 from csv import reader, writer
 
@@ -170,12 +172,39 @@ def get_all_translations(lang: str) -> dict[str, str]:
 		return all_translations
 
 	try:
-		return frappe.cache.hget(MERGED_TRANSLATION_KEY, lang, generator=_merge_translations)
+		result = frappe.cache.hget(MERGED_TRANSLATION_KEY, lang, generator=_merge_translations)
+		_touch_translation_lang(lang)
+		return result
 	except Exception:
 		# People mistakenly call translation function on global variables
 		# where locals are not initialized, translations don't make much sense there
 		frappe.logger().error("Unable to load translations", exc_info=True)
 		return {}
+
+
+# Phase 24.5: the merged-translation cache is a single hash with one field per
+# language — each field is the full translation dict (large). FIFO max_entries
+# bounds top-level keys, not hash fields, so a multi-lang site would accumulate
+# every language forever. Cap the resident set to the N most-recently-used
+# languages (most sites use 1-2), evicting the LRU field. Locked for no-GIL.
+TRANSLATION_LRU_SIZE = 5
+_translation_lru: "OrderedDict[str, None]" = OrderedDict()
+_translation_lru_lock = threading.Lock()
+
+
+def _touch_translation_lang(lang: str) -> None:
+	with _translation_lru_lock:
+		_translation_lru[lang] = None
+		_translation_lru.move_to_end(lang)
+		while len(_translation_lru) > TRANSLATION_LRU_SIZE:
+			evicted, _ = _translation_lru.popitem(last=False)
+			with suppress(Exception):
+				frappe.cache.hdel(MERGED_TRANSLATION_KEY, evicted)
+
+
+def _reset_translation_lru() -> None:
+	with _translation_lru_lock:
+		_translation_lru.clear()
 
 
 def get_translations_from_apps(lang, apps=None):
@@ -250,6 +279,7 @@ def clear_cache():
 	frappe.cache.delete_value(
 		keys=["bootinfo", USER_TRANSLATION_KEY, MERGED_TRANSLATION_KEY],
 	)
+	_reset_translation_lru()
 	change_translation_version()
 
 
