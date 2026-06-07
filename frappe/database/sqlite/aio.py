@@ -5,7 +5,7 @@
 Same SQL/transaction semantics as SQLiteDatabase — only the driver edge
 changes: connection and cursor are aiosqlite objects living on the bridge
 loop, reached through the sync adapters in frappe.database.aio. Enabled
-per site with ``use_async_db: 1`` in site_config.json.
+bench-wide with ``use_async_db: 1`` in common_site_config.json (Phase 19).
 """
 
 import sqlite3

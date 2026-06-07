@@ -72,7 +72,7 @@ def get_db(socket=None, host=None, user=None, password=None, port=None, cur_db_n
 			socket, host, user, password, port, cur_db_name
 		)
 	elif conf.db_type == "sqlite":
-		if conf.get("use_async_db"):
+		if frappe.get_common_conf("use_async_db"):
 			import frappe.database.sqlite.aio
 
 			return frappe.database.sqlite.aio.AsyncSQLiteDatabase(cur_db_name=cur_db_name)
@@ -80,7 +80,7 @@ def get_db(socket=None, host=None, user=None, password=None, port=None, cur_db_n
 		import frappe.database.sqlite.database
 
 		return frappe.database.sqlite.database.SQLiteDatabase(cur_db_name=cur_db_name)
-	elif conf.get("use_async_db"):
+	elif frappe.get_common_conf("use_async_db"):
 		import frappe.database.mariadb.aio
 
 		return frappe.database.mariadb.aio.AsyncMariaDBDatabase(

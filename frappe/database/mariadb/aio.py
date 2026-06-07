@@ -5,13 +5,13 @@
 Same Database semantics as the pymysql backend — only the driver edge
 changes: connections come from a per-site aiomysql pool living on the
 bridge loop, reached through the sync adapters in frappe.database.aio.
-Enabled per site with ``use_async_db: 1`` in site_config.json; pymysql
-fallback is one flag flip away.
+Enabled bench-wide with ``use_async_db: 1`` in common_site_config.json
+(Phase 19); pymysql fallback is one flag flip away.
 
 Pool rules (spec):
 - one pool per site (= per credentials/db), created lazily under an
   asyncio.Lock so two concurrent first-requests can't double-create
-- minsize=0, maxsize from site config ``db_pool_size`` (default 5) —
+- minsize=0, maxsize from common config ``db_pool_size`` (default 5) —
   thread-pool concurrency must not exceed Σ maxsize over hot sites
 - bounded acquire wait (``db_pool_acquire_timeout``, default 10 s) —
   a full pool raises 503 instead of deadlocking the request
@@ -249,14 +249,13 @@ class AsyncMariaDBDatabase(MariaDBDatabase):
 		# config + site context read HERE (caller thread); the acquire
 		# coroutine then runs context-free on the bridge loop
 		key = self._pool_key()
-		conf = frappe.conf
 		coro = _acquire(
 			key,
 			self._aio_connection_settings(),
-			maxsize=conf.get("db_pool_size") or DEFAULT_POOL_SIZE,
-			pool_recycle=conf.get("db_pool_recycle") or DEFAULT_POOL_RECYCLE,
-			idle_timeout=conf.get("db_pool_idle_timeout") or DEFAULT_IDLE_TIMEOUT,
-			acquire_timeout=conf.get("db_pool_acquire_timeout") or DEFAULT_ACQUIRE_TIMEOUT,
+			maxsize=frappe.get_common_conf("db_pool_size") or DEFAULT_POOL_SIZE,
+			pool_recycle=frappe.get_common_conf("db_pool_recycle") or DEFAULT_POOL_RECYCLE,
+			idle_timeout=frappe.get_common_conf("db_pool_idle_timeout") or DEFAULT_IDLE_TIMEOUT,
+			acquire_timeout=frappe.get_common_conf("db_pool_acquire_timeout") or DEFAULT_ACQUIRE_TIMEOUT,
 		)
 		aconn = run_coroutine_sync(run_in_clean_context(coro))
 		bridged = BridgedConnection(aconn, releaser=partial(_release_conn, key=key))
