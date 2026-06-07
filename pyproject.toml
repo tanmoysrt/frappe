@@ -45,6 +45,9 @@ dependencies = [
     "num2words~=0.5.14",
     "oauthlib~=3.3.1",
     "openpyxl~=3.1.5",
+    # frappe/utils/pdf.py imports packaging.version directly; a fresh bench
+    # init env lacks it unless declared (found by the bench-tmp install)
+    "packaging~=25.0",
     "xlsxwriter~=3.2.9",
     # msgspec replaced orjson (Phase 23): orjson has no free-threaded
     # cp314t wheel; msgspec declares free-threaded support, same strict JSON
