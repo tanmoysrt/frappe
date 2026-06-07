@@ -51,7 +51,8 @@ class TestHeaders(UnitTestCase):
 		h.set("Content-Disposition", "attachment", filename="my report.csv")
 		self.assertEqual(h.get("Content-Disposition"), 'attachment; filename="my report.csv"')
 		h.set("Content-Disposition", "attachment", filename="रिपोर्ट.csv")
-		self.assertIn("filename*=UTF-8''", h.get("Content-Disposition"))
+		# werkzeug parity: non-ascii filenames stay quoted (no RFC 5987 form)
+		self.assertEqual(h.get("Content-Disposition"), 'attachment; filename="रिपोर्ट.csv"')
 
 	def test_iter_yields_pairs(self):
 		h = Headers({"A": "1", "B": "2"})

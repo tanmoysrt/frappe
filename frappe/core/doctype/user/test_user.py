@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
-from werkzeug.http import parse_cookie
+from frappe.http import parse_cookie_header as parse_cookie
 
 import frappe
 import frappe.exceptions

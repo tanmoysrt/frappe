@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
-from werkzeug.test import TestResponse
+from frappe.testing.client import TestResponse
 
 import frappe
 from frappe.integrations.oauth2 import encode_params

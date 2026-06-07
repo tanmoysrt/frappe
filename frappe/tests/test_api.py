@@ -11,7 +11,7 @@ from urllib.parse import urlencode, urljoin
 
 import requests
 from filetype import guess_mime
-from werkzeug.test import TestResponse
+from frappe.testing.client import TestResponse
 
 import frappe
 from frappe.installer import update_site_config

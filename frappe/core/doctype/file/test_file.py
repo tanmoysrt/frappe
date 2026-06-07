@@ -647,13 +647,10 @@ class TestFile(IntegrationTestCase):
 	)
 	def test_guest_upload_to_non_allowed_doctype(self):
 		"""Verify Guest cannot upload to a restricted DocType."""
-		from werkzeug.test import EnvironBuilder
-		from werkzeug.wrappers import Request
-
 		from frappe.handler import upload_file
+		from frappe.http import Request
 
-		builder = EnvironBuilder(path="/", base_url="http://localhost")
-		frappe.local.request = Request(builder.get_environ())
+		frappe.local.request = Request.from_values(path="/", host="localhost")
 
 		frappe.set_user("Guest")
 		frappe.form_dict.doctype = "User"
@@ -674,13 +671,10 @@ class TestFile(IntegrationTestCase):
 	)
 	def test_guest_upload_to_allowed_doctype(self):
 		"""Verify Guest can upload to an explicitly whitelisted DocType."""
-		from werkzeug.test import EnvironBuilder
-		from werkzeug.wrappers import Request
-
 		from frappe.handler import upload_file
+		from frappe.http import Request
 
-		builder = EnvironBuilder(path="/", base_url="http://localhost")
-		frappe.local.request = Request(builder.get_environ())
+		frappe.local.request = Request.from_values(path="/", host="localhost")
 
 		frappe.set_user("Administrator")
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "Test Target"}).insert()
@@ -715,13 +709,10 @@ class TestFile(IntegrationTestCase):
 	)
 	def test_guest_upload_for_empty_whitelist(self):
 		"""Verify Guest can upload anywhere if the configuration whitelist string is left completely empty."""
-		from werkzeug.test import EnvironBuilder
-		from werkzeug.wrappers import Request
-
 		from frappe.handler import upload_file
+		from frappe.http import Request
 
-		builder = EnvironBuilder(path="/", base_url="http://localhost")
-		frappe.local.request = Request(builder.get_environ())
+		frappe.local.request = Request.from_values(path="/", host="localhost")
 
 		frappe.set_user("Guest")
 		frappe.form_dict.doctype = "User"

@@ -1,6 +1,6 @@
 # Copyright (c) 2020, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
-from werkzeug.wrappers import Response
+from frappe.http import Response
 
 import frappe
 from frappe.app import process_response

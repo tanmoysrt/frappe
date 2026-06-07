@@ -4,8 +4,7 @@ import datetime
 import time
 
 import requests
-from werkzeug.test import EnvironBuilder
-from werkzeug.wrappers import Request
+from frappe.http import Request
 
 import frappe
 from frappe.auth import LoginAttemptTracker
@@ -172,9 +171,7 @@ class TestAuth(IntegrationTestCase):
 class TestAllowedReferrer(UnitTestCase):
 	def test_is_allowed_referrer(self):
 		def create_request(headers):
-			builder = EnvironBuilder(headers=headers)
-			env = builder.get_environ()
-			return Request(env)
+			return Request.from_values(headers=headers)
 
 		# Set a single allowed referrer
 		frappe.cache.set_value("allowed_referrers", ["https://example.com"])

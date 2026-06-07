@@ -22,7 +22,6 @@ from email.utils import formataddr, getaddresses, parseaddr
 from typing import Any, Generic, TypeAlias, TypedDict
 
 import orjson
-from werkzeug.test import Client
 
 from frappe.deprecation_dumpster import gzip_compress, gzip_decompress, make_esc
 
@@ -609,11 +608,11 @@ def touch_file(path):
 	return path
 
 
-def get_test_client(use_cookies=True) -> Client:
-	"""Return an test instance of the Frappe WSGI."""
-	from frappe.app import application
+def get_test_client(use_cookies=True) -> "Client":
+	"""Return a test client driving the native request pipeline."""
+	from frappe.testing.client import Client
 
-	return Client(application, use_cookies=use_cookies)
+	return Client(use_cookies=use_cookies)
 
 
 def get_hook_method(hook_name, fallback=None):
@@ -932,11 +931,9 @@ def create_batch(iterable: Iterable, size: int) -> Generator[Iterable]:
 
 
 def set_request(**kwargs):
-	from werkzeug.test import EnvironBuilder
-	from werkzeug.wrappers import Request
+	from frappe.http import Request
 
-	builder = EnvironBuilder(**kwargs)
-	frappe.local.request = Request(builder.get_environ())
+	frappe.local.request = Request.from_values(**kwargs)
 
 
 def get_html_for_route(route):

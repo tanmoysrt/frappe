@@ -3,7 +3,7 @@
 
 import time
 
-from werkzeug.wrappers import Response
+from frappe.http import Response
 
 import frappe
 import frappe.rate_limiter

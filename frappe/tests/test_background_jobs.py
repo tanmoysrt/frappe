@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 from rq import Queue
-from werkzeug.local import Local
+from frappe.utils.local import Local
 
 import frappe
 from frappe.config import patch_common_conf
