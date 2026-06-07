@@ -66,11 +66,48 @@ class SMTPServer:
 	def session(self):
 		"""Get SMTP session.
 
-		We make best effort to revive connection if it's disconnected by checking the connection
-		health before returning it to user."""
+		Async-primary (Phase 12): the wire protocol runs on aiosmtplib via the
+		bridge loop, behind a sync smtplib-shaped facade — call-sites unchanged.
+		OAuth keeps the smtplib path (frappe.email.oauth drives the raw
+		smtplib session). We make best effort to revive the connection by
+		checking its health before returning it to the user.
+		"""
 		if self.is_session_active():
 			return self._session
 
+		if self.use_oauth:
+			self._session = self._smtplib_session()
+		else:
+			self._session = self._aiosmtplib_session()
+		self._enqueue_connection_closure()
+		return self._session
+
+	def _aiosmtplib_session(self):
+		import aiosmtplib
+
+		from frappe.email.aio import connect
+
+		try:
+			return connect(
+				server=self.server,
+				port=self.port,
+				use_ssl=self.use_ssl,
+				use_tls=self.use_tls,
+				timeout=self.timeout,
+				login=self.login,
+				password=self.password,
+				ehlo_after_auth=not frappe.conf.smtp_no_ehlo_after_auth,
+			)
+		except aiosmtplib.SMTPAuthenticationError:
+			self.throw_invalid_credentials_exception(email_account=self.email_account)
+		except (aiosmtplib.SMTPConnectError, aiosmtplib.SMTPConnectTimeoutError, OSError) as e:
+			# Invalid mail server -- due to refusing connection
+			frappe.throw(
+				_("Invalid Outgoing Mail Server or Port: {0}").format(str(e)),
+				title=_("Incorrect Configuration"),
+			)
+
+	def _smtplib_session(self):
 		SMTP = smtplib.SMTP_SSL if self.use_ssl else smtplib.SMTP
 
 		try:
@@ -96,9 +133,7 @@ class SMTPServer:
 			if not frappe.conf.smtp_no_ehlo_after_auth:
 				_session.ehlo()
 
-			self._session = _session
-			self._enqueue_connection_closure()
-			return self._session
+			return _session
 
 		except smtplib.SMTPAuthenticationError:
 			self.throw_invalid_credentials_exception(email_account=self.email_account)
