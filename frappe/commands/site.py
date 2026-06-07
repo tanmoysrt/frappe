@@ -21,9 +21,12 @@ from frappe.utils.bench_helper import CliCtxObj
 @click.option("--db-password", help="Database password")
 @click.option(
 	"--db-type",
-	default="mariadb",
+	# Phase 24.10 lean default: a new site lands on the smallest-memory backend
+	# (sqlite via libsql; pairs with the in-process cache + sqlite queue light
+	# mode). Heavy backends are one explicit flag away: --db-type mariadb/postgres.
+	default="sqlite",
 	type=click.Choice(["mariadb", "postgres", "sqlite"]),
-	help='Optional "sqlite", "postgres" or "mariadb". Default is "mariadb"',
+	help='Optional "sqlite", "postgres" or "mariadb". Default is "sqlite" (lean light mode)',
 )
 @click.option("--db-host", help="Database Host")
 @click.option("--db-port", type=int, help="Database Port")
