@@ -73,13 +73,21 @@ def get_queues_timeout() -> dict[str, int]:
 	}
 
 
-def get_queue_backend() -> str:
-	"""Per-site queue backend (Phase 9): "rq" (default) or "sqlite".
+QUEUE_BACKENDS = ("sqlite", "rq", "arq")
 
-	"sqlite" = in-process asyncio workers on a bench-local SQLite file —
-	no worker processes, no queue Redis (frappe.utils.sqlite_queue).
+
+def get_queue_backend() -> str:
+	"""Per-site queue backend (Phase 9/10), ``queue_backend`` in site config.
+
+	- "sqlite" (default since Phase 10): in-process asyncio workers on a
+	  bench-local SQLite file — no worker processes, no queue Redis. The
+	  simplest thing for a fresh light-mode install: just `python3 app.py`.
+	- "rq": permanent, fully supported backend for large deployments —
+	  `bench worker` processes against queue Redis, exactly as today.
+	  Not deprecated, never removed; light vs heavy is a config choice.
+	- "arq": opt-in asyncio-native scale-out (frappe.utils.arq_queue).
 	"""
-	return frappe.conf.get("queue_backend") or "rq"
+	return frappe.conf.get("queue_backend") or "sqlite"
 
 
 def enqueue(
@@ -140,7 +148,8 @@ def enqueue(
 				# delete job to avoid argument issues related to job args
 				# https://github.com/rq/rq/issues/793
 				job.delete()
-		# sqlite backend: job_id is a UNIQUE column — dedup happens in the INSERT
+		# sqlite/arq: dedup happens in the backend itself (UNIQUE job_id column
+		# / arq's built-in job-id dedup) — the INSERT/enqueue returns None
 
 		# If job exists and is completed then delete it before re-queue
 
@@ -167,8 +176,13 @@ def enqueue(
 	if call_directly:
 		return frappe.call(method, **kwargs)
 
-	if backend == "sqlite":
-		from frappe.utils import sqlite_queue
+	if backend != "rq":
+		if backend == "sqlite":
+			from frappe.utils import sqlite_queue as backend_module
+		elif backend == "arq":
+			from frappe.utils import arq_queue as backend_module
+		else:
+			frappe.throw(_("Unknown queue_backend: {0}").format(backend))
 
 		if isinstance(method, Callable):
 			method_name = f"{method.__module__}.{method.__qualname__}"
@@ -185,14 +199,14 @@ def enqueue(
 			"kwargs": kwargs,
 		}
 
-		def enqueue_sqlite():
-			return sqlite_queue.enqueue_job(queue_args, queue=queue, job_id=job_id)
+		def enqueue_alt_backend():
+			return backend_module.enqueue_job(queue_args, queue=queue, job_id=job_id)
 
 		if enqueue_after_commit:
-			frappe.db.after_commit.add(enqueue_sqlite)
+			frappe.db.after_commit.add(enqueue_alt_backend)
 			return
 
-		return enqueue_sqlite()
+		return enqueue_alt_backend()
 
 	try:
 		q = get_queue(queue, is_async=is_async)
@@ -710,10 +724,15 @@ def create_job_id(job_id: str | None = None) -> str:
 
 
 def is_job_enqueued(job_id: str) -> bool:
-	if get_queue_backend() == "sqlite":
+	backend = get_queue_backend()
+	if backend == "sqlite":
 		from frappe.utils import sqlite_queue
 
 		return sqlite_queue.is_job_enqueued(create_job_id(job_id))
+	if backend == "arq":
+		from frappe.utils import arq_queue
+
+		return arq_queue.is_job_enqueued(create_job_id(job_id))
 	return get_job_status(job_id) in (JobStatus.QUEUED, JobStatus.STARTED)
 
 

@@ -19,6 +19,13 @@ from frappe.utils.background_jobs import (
 
 
 class TestBackgroundJobs(IntegrationTestCase):
+	def setUp(self):
+		# these tests exercise the RQ backend specifically (Phase 10 flipped
+		# the default to "sqlite")
+		frappe.conf["queue_backend"] = "rq"
+		self.addCleanup(frappe.conf.pop, "queue_backend", None)
+		super().setUp()
+
 	def test_remove_failed_jobs(self):
 		frappe.enqueue(method="frappe.tests.test_background_jobs.fail_function", queue="short")
 		# wait for enqueued job to execute

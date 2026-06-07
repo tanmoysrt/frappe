@@ -27,6 +27,10 @@ class TestRQJob(IntegrationTestCase):
 	BG_JOB = "frappe.core.doctype.rq_job.test_rq_job.test_func"
 
 	def setUp(self) -> None:
+		# these tests exercise the RQ backend specifically (Phase 10 flipped
+		# the default to "sqlite")
+		frappe.conf["queue_backend"] = "rq"
+		self.addCleanup(frappe.conf.pop, "queue_backend", None)
 		# Cleanup all pending jobs
 		for job in frappe.get_all("RQ Job", {"status": "queued"}):
 			frappe.get_doc("RQ Job", job.name).cancel()
