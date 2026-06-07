@@ -38,6 +38,13 @@ _DONE = object()
 
 def _build_wsgi_app():
 	"""Build the same WSGI stack frappe.app.serve() builds, once at import."""
+	if os.environ.get("USE_PROFILER"):
+		from werkzeug.middleware.profiler import ProfilerMiddleware
+
+		# assign the global: application_with_statics() wraps frappe.app.application
+		frappe.app.application = ProfilerMiddleware(
+			frappe.app.application, sort_by=("cumtime", "calls"), restrictions=(200,)
+		)
 	app = frappe.app.application
 	if not os.environ.get("NO_STATICS"):
 		# mutates frappe.app.application: SharedData(/assets) + StaticData(/files)
@@ -228,6 +235,64 @@ def _next_chunk(iterator, iterable, state):
 		# the number of concurrent clients.
 		_cleanup(iterable, state)
 		return _DONE
+
+
+def serve(port=None, site=None, sites_path=".", proxy=False):
+	"""Programmatic uvicorn server — the framework-owned replacement for the
+	gunicorn / werkzeug run_simple paths (Phase 20). `bench serve` lands here;
+	bench-root app.py adds malloc tuning + re-exec on top of the same core.
+
+	Knobs (common config, env override): asgi_pool_size / FRAPPE_POOL_SIZE,
+	asgi_limit_concurrency / FRAPPE_LIMIT_CONCURRENCY, webserver_port /
+	FRAPPE_PORT, asgi_thread_stack / FRAPPE_THREAD_STACK.
+	"""
+	import threading
+	from concurrent.futures import ThreadPoolExecutor
+
+	import uvicorn
+
+	import frappe.app
+
+	if site:
+		frappe.app._site = site
+	frappe.app._sites_path = sites_path
+	os.environ["SITES_PATH"] = sites_path
+	if proxy:
+		os.environ["USE_PROXY"] = "1"
+
+	def knob(key, default, env):
+		value = os.environ.get(env)
+		if value is None:
+			value = frappe.get_common_site_config(sites_path).get(key)
+		return int(value) if value is not None else default
+
+	pool_size = knob("asgi_pool_size", 2 * (os.cpu_count() or 1), "FRAPPE_POOL_SIZE")
+	limit_concurrency = knob("asgi_limit_concurrency", 4 * pool_size, "FRAPPE_LIMIT_CONCURRENCY")
+	port = int(port) if port else knob("webserver_port", 8000, "FRAPPE_PORT")
+	thread_stack = knob("asgi_thread_stack", 512 * 1024, "FRAPPE_THREAD_STACK")
+
+	async def _main():
+		loop = asyncio.get_running_loop()
+		# smaller stacks: default 8 MB per pool thread is pure waste here
+		threading.stack_size(thread_stack)
+		loop.set_default_executor(
+			ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="frappe_sync")
+		)
+		threading.stack_size(0)
+		config = uvicorn.Config(
+			"frappe.asgi:application",
+			host="0.0.0.0",
+			port=port,
+			loop="asyncio",
+			interface="asgi3",
+			lifespan="on",
+			limit_concurrency=limit_concurrency,
+			log_level=os.environ.get("FRAPPE_LOG_LEVEL", "info"),
+			access_log=False,
+		)
+		await uvicorn.Server(config).serve()
+
+	asyncio.run(_main())
 
 
 async def _handle_http(scope, receive, send):

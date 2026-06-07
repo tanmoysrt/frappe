@@ -1062,66 +1062,6 @@ class TestCLIImplementation(BaseTestCommands):
 		self.assertRegex(self.stderr, r"No such.*migrat.*migrate")
 
 
-class TestGunicornWorker(IntegrationTestCase):
-	port = 8005
-
-	def spawn_gunicorn(self, args=None):
-		self.handle = subprocess.Popen(
-			[
-				sys.executable,
-				"-m",
-				"gunicorn",
-				"-b",
-				f"127.0.0.1:{self.port}",
-				"-w1",
-				"frappe.app:application",
-				"--preload",
-				*(args or ()),
-			],
-		)
-		time.sleep(1)  # let worker startup finish
-		self.addCleanup(self.kill_gunicorn)
-
-	def kill_gunicorn(self):
-		time.sleep(2)
-		self.handle.send_signal(signal.SIGTERM)
-		try:
-			self.handle.communicate(timeout=2)
-		except subprocess.TimeoutExpired:
-			pass
-
-		time.sleep(2)
-		execute_in_shell("pgrep gunicorn | xargs -L1 kill -9")
-
-	@unittest.skip("Flaky test")
-	def test_gunicorn_ping_sync(self):
-		self.spawn_gunicorn()
-		path = f"http://{self.TEST_SITE}:{self.port}/api/method/ping"
-		self.assertEqual(requests.get(path).status_code, 200)
-
-	@unittest.skip("Flaky test")
-	def test_gunicorn_ping_gthread(self):
-		self.spawn_gunicorn(["--threads=2"])
-		path = f"http://{self.TEST_SITE}:{self.port}/api/method/ping"
-		self.assertEqual(requests.get(path).status_code, 200)
-
-	@unittest.skip("Flaky test")
-	def test_gunicorn_idle_cpu_usage(self):
-		def get_total_usage():
-			process = psutil.Process(self.handle.pid)
-			return sum(c.cpu_percent(1.0) for c in process.children(True)) + process.cpu_percent(1.0)
-
-		usage_threshold = 10
-
-		self.spawn_gunicorn(["--threads=2"])
-		self.assertLessEqual(get_total_usage(), usage_threshold)
-
-		# Wake up at least one thread, go idle and check again
-		path = f"http://{self.TEST_SITE}:{self.port}/api/method/ping"
-		self.assertEqual(requests.get(path).status_code, 200)
-		self.assertLessEqual(get_total_usage(), usage_threshold)
-
-
 class TestRQWorker(IntegrationTestCase):
 	def spawn_rq(self, args=None, pool=False):
 		self.handle = subprocess.Popen(

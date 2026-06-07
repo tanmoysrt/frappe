@@ -2,13 +2,10 @@
 # License: MIT. See LICENSE
 
 import functools
-import logging
 import os
 
 import orjson
 from werkzeug.exceptions import HTTPException, NotFound
-from werkzeug.middleware.profiler import ProfilerMiddleware
-from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.middleware.shared_data import SharedDataMiddleware
 from werkzeug.wrappers import Request, Response
 from werkzeug.wsgi import ClosingIterator
@@ -489,41 +486,19 @@ def serve(
 	sites_path=".",
 	proxy=False,
 ):
-	global application, _site, _sites_path
-	_site = site
-	_sites_path = sites_path
+	"""`bench serve` → programmatic uvicorn on the native ASGI app (Phase 20).
 
-	from werkzeug.serving import run_simple
+	gunicorn and werkzeug's run_simple are gone — one serving stack for dev
+	and production. no_reload/no_threading kept for CLI compatibility (the
+	asyncio loop + thread pool make them meaningless).
+	"""
+	if profile:
+		# picked up by frappe.asgi._build_wsgi_app on first import
+		os.environ["USE_PROFILER"] = "1"
 
-	if profile or os.environ.get("USE_PROFILER"):
-		application = ProfilerMiddleware(application, sort_by=("cumtime", "calls"), restrictions=(200,))
+	import frappe.asgi
 
-	if not os.environ.get("NO_STATICS"):
-		application = application_with_statics()
-
-	if proxy or os.environ.get("USE_PROXY"):
-		application = ProxyFix(application, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
-
-	application.debug = True
-	application.config = {"SERVER_NAME": "127.0.0.1:8000"}
-
-	log = logging.getLogger("werkzeug")
-	log.propagate = False
-
-	in_test_env = os.environ.get("CI")
-	if in_test_env:
-		log.setLevel(logging.ERROR)
-
-	run_simple(
-		"0.0.0.0",
-		int(port),
-		application,
-		exclude_patterns=["test_*"],
-		use_reloader=False if in_test_env else not no_reload,
-		use_debugger=not in_test_env,
-		use_evalex=not in_test_env,
-		threaded=not no_threading,
-	)
+	frappe.asgi.serve(port=port, site=site, sites_path=sites_path, proxy=proxy)
 
 
 def application_with_statics():
