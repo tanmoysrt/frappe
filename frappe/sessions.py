@@ -8,10 +8,11 @@ permission, homepage, default variables, system defaults etc
 """
 
 import json
+import threading
+from collections import OrderedDict
+from contextlib import suppress
 from datetime import UTC, datetime, timezone
 from urllib.parse import unquote
-
-import redis
 
 import frappe
 import frappe.defaults
@@ -25,6 +26,34 @@ from frappe.query_builder import Order
 from frappe.utils import cint, cstr, get_assets_json
 from frappe.utils.change_log import has_app_update_notifications
 from frappe.utils.data import add_to_date
+
+# Phase 24.9: the "session" and "bootinfo" cache hashes hold one field per active
+# sid / user — boot data per session is the big payload, and the FIFO max_entries
+# bound only caps top-level keys, not hash fields. Cap the resident set to the N
+# most-recently-used fields; evicted sessions fall back to tabSessions (resume()
+# already reads from the DB on a cache miss) and bootinfo is regenerated. Locked
+# for free-threading.
+SESSION_CACHE_LRU_SIZE = 1000
+_session_lru: "OrderedDict[str, None]" = OrderedDict()
+_bootinfo_lru: "OrderedDict[str, None]" = OrderedDict()
+_session_lru_lock = threading.Lock()
+
+
+def _touch_cache_field(hash_name: str, field: str, lru: "OrderedDict[str, None]") -> None:
+	if not field:
+		return
+	with _session_lru_lock:
+		lru[field] = None
+		lru.move_to_end(field)
+		while len(lru) > SESSION_CACHE_LRU_SIZE:
+			evicted, _ = lru.popitem(last=False)
+			with suppress(Exception):
+				frappe.cache.hdel(hash_name, evicted)
+
+
+def _forget_cache_field(field: str, lru: "OrderedDict[str, None]") -> None:
+	with _session_lru_lock:
+		lru.pop(field, None)
 
 
 @frappe.whitelist()
@@ -99,6 +128,7 @@ def delete_session(sid=None, user=None, reason="Session Expired"):
 	frappe.db.commit(chain=True)
 
 	frappe.cache.hdel("session", sid)
+	_forget_cache_field(sid, _session_lru)
 
 
 def clear_all_sessions(reason=None):
@@ -138,11 +168,15 @@ def get():
 		if bootinfo:
 			bootinfo["from_cache"] = 1
 			bootinfo["user"]["recent"] = json.dumps(frappe.cache.hget("user_recent", frappe.session.user))
+			_touch_cache_field("bootinfo", frappe.session.user, _bootinfo_lru)
 
 	if not bootinfo:
+		import redis
+
 		# if not create it
 		bootinfo = get_bootinfo()
 		frappe.cache.hset("bootinfo", frappe.session.user, bootinfo)
+		_touch_cache_field("bootinfo", frappe.session.user, _bootinfo_lru)
 		try:
 			frappe.cache.ping()
 		except redis.exceptions.ConnectionError:
@@ -314,6 +348,7 @@ class Session:
 			)
 		).run()
 		frappe.cache.hset("session", self.data.sid, self.data)
+		_touch_cache_field("session", self.data.sid, _session_lru)
 
 	def resume(self):
 		"""non-login request: load a session"""
@@ -359,6 +394,7 @@ class Session:
 	def get_session_data_from_cache(self):
 		data = frappe.cache.hget("session", self.sid)
 		if data:
+			_touch_cache_field("session", self.sid, _session_lru)
 			data = frappe._dict(data)
 			session_data = data.get("data", {})
 
@@ -444,6 +480,7 @@ class Session:
 			frappe.db.commit(chain=True)
 			updated_in_db = True
 			frappe.cache.hset("session", self.sid, self.data)
+			_touch_cache_field("session", self.sid, _session_lru)
 
 		return updated_in_db
 
