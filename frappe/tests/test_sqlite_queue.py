@@ -11,6 +11,7 @@ import time
 from unittest.mock import patch
 
 import frappe
+from frappe.config import patch_common_conf
 from frappe.tests import AsyncIntegrationTestCase, IntegrationTestCase
 from frappe.utils import sqlite_queue
 
@@ -92,11 +93,8 @@ class TestSQLiteQueueProducer(SQLiteQueueTestMixin, IntegrationTestCase):
 
 	def test_frappe_enqueue_backend_switch(self):
 		db_path = self.use_tmp_queue_db()
-		frappe.local.conf["queue_backend"] = "sqlite"
-		try:
+		with patch_common_conf(queue_backend="sqlite"):
 			job = frappe.enqueue("frappe.tests.test_sqlite_queue.sync_probe", value=42)
-		finally:
-			del frappe.local.conf["queue_backend"]
 		self.assertIsInstance(job, sqlite_queue.SQLiteJob)
 		rows = self.rows(db_path)
 		self.assertEqual(len(rows), 1)

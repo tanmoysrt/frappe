@@ -77,7 +77,8 @@ QUEUE_BACKENDS = ("sqlite", "rq", "arq")
 
 
 def get_queue_backend() -> str:
-	"""Per-site queue backend (Phase 9/10), ``queue_backend`` in site config.
+	"""Bench-wide queue backend (Phase 9/10/19), ``queue_backend`` in
+	common_site_config.json — architecture knob, never per-site.
 
 	- "sqlite" (default since Phase 10): in-process asyncio workers on a
 	  bench-local SQLite file — no worker processes, no queue Redis. The
@@ -87,7 +88,7 @@ def get_queue_backend() -> str:
 	  Not deprecated, never removed; light vs heavy is a config choice.
 	- "arq": opt-in asyncio-native scale-out (frappe.utils.arq_queue).
 	"""
-	return frappe.conf.get("queue_backend") or "sqlite"
+	return frappe.get_common_conf("queue_backend") or "sqlite"
 
 
 def enqueue(

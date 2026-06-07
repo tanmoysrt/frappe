@@ -12,6 +12,7 @@ from unittest.mock import patch
 from asgiref.sync import sync_to_async
 
 import frappe
+from frappe.config import patch_common_conf
 from frappe.tests import AsyncIntegrationTestCase, IntegrationTestCase
 from frappe.utils import arq_queue
 from frappe.utils.background_jobs import get_queue_backend
@@ -25,18 +26,23 @@ def arq_probe(value=None):
 
 class TestQueueBackendDefault(IntegrationTestCase):
 	def test_default_is_sqlite(self):
-		frappe.conf.pop("queue_backend", None)
-		self.assertEqual(get_queue_backend(), "sqlite")
+		with patch_common_conf(queue_backend=None):
+			self.assertEqual(get_queue_backend(), "sqlite")
 
 	def test_rq_stays_configurable(self):
-		frappe.conf["queue_backend"] = "rq"
-		self.addCleanup(frappe.conf.pop, "queue_backend", None)
-		self.assertEqual(get_queue_backend(), "rq")
+		with patch_common_conf(queue_backend="rq"):
+			self.assertEqual(get_queue_backend(), "rq")
 
 	def test_unknown_backend_throws(self):
-		frappe.conf["queue_backend"] = "carrier-pigeon"
+		with patch_common_conf(queue_backend="carrier-pigeon"):
+			self.assertRaises(frappe.ValidationError, frappe.enqueue, "frappe.handler.ping")
+
+	def test_site_config_value_is_ignored(self):
+		# Phase 19: queue_backend in site_config.json must NOT affect the reader
+		frappe.conf["queue_backend"] = "rq"
 		self.addCleanup(frappe.conf.pop, "queue_backend", None)
-		self.assertRaises(frappe.ValidationError, frappe.enqueue, "frappe.handler.ping")
+		with patch_common_conf(queue_backend=None):
+			self.assertEqual(get_queue_backend(), "sqlite")
 
 
 class TestArqQueue(AsyncIntegrationTestCase):

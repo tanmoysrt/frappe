@@ -8,6 +8,7 @@ from rq import exceptions as rq_exc
 from rq.job import Job
 
 import frappe
+from frappe.config import patch_common_conf
 from frappe.core.doctype.rq_job.rq_job import RQJob, remove_failed_jobs, stop_job
 from frappe.installer import update_site_config
 from frappe.tests import IntegrationTestCase, timeout
@@ -28,9 +29,8 @@ class TestRQJob(IntegrationTestCase):
 
 	def setUp(self) -> None:
 		# these tests exercise the RQ backend specifically (Phase 10 flipped
-		# the default to "sqlite")
-		frappe.conf["queue_backend"] = "rq"
-		self.addCleanup(frappe.conf.pop, "queue_backend", None)
+		# the default to "sqlite"; Phase 19 made the knob common-config only)
+		self.enterContext(patch_common_conf(queue_backend="rq"))
 		# Cleanup all pending jobs
 		for job in frappe.get_all("RQ Job", {"status": "queued"}):
 			frappe.get_doc("RQ Job", job.name).cancel()

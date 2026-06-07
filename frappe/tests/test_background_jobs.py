@@ -6,6 +6,7 @@ from rq import Queue
 from werkzeug.local import Local
 
 import frappe
+from frappe.config import patch_common_conf
 from frappe.core.doctype.rq_job.rq_job import remove_failed_jobs
 from frappe.tests import IntegrationTestCase
 from frappe.utils.background_jobs import (
@@ -21,9 +22,8 @@ from frappe.utils.background_jobs import (
 class TestBackgroundJobs(IntegrationTestCase):
 	def setUp(self):
 		# these tests exercise the RQ backend specifically (Phase 10 flipped
-		# the default to "sqlite")
-		frappe.conf["queue_backend"] = "rq"
-		self.addCleanup(frappe.conf.pop, "queue_backend", None)
+		# the default to "sqlite"; Phase 19 made the knob common-config only)
+		self.enterContext(patch_common_conf(queue_backend="rq"))
 		super().setUp()
 
 	def test_remove_failed_jobs(self):
