@@ -9,12 +9,9 @@ bench-wide with ``use_async_db: 1`` in common_site_config.json (Phase 19).
 """
 
 import sqlite3
-from datetime import date, datetime, time
-
-import aiosqlite
 
 from frappe.database.aio import BridgedConnection, run_in_clean_context
-from frappe.database.sqlite.database import SQLiteDatabase, regexp, regexp_replace
+from frappe.database.sqlite.database import SQLiteDatabase
 from frappe.dispatch import run_coroutine_sync
 
 # Memory hygiene (spec): sqlite defaults multiply silently across per-site
@@ -42,23 +39,14 @@ class AsyncSQLiteDatabase(SQLiteDatabase):
 
 
 async def _aconnect(db_path, read_only: bool):
-	# converters are registered on the sqlite3 module (global, idempotent)
-	sqlite3.register_converter("timestamp", lambda x: datetime.fromisoformat(x.decode()))
-	sqlite3.register_converter("date", lambda x: date.fromisoformat(x.decode()))
-	sqlite3.register_converter("time", lambda x: time.fromisoformat(x.decode()))
+	# libsql engine (Phase 22), the only engine for the main DB: same
+	# thread-runner shape aiosqlite had; REGEXP is native (no
+	# create_function), type conversion lives in the compat adapter
+	from frappe.database.sqlite import libsql_compat
 
-	if read_only:
-		conn = await aiosqlite.connect(
-			f"file:{db_path}?mode=ro",
-			uri=True,
-			detect_types=sqlite3.PARSE_DECLTYPES,
-			timeout=15,
-		)
-	else:
-		conn = await aiosqlite.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=15)
-
-	await conn.create_function("regexp", 2, regexp)
-	await conn.create_function("regexp_replace", 3, regexp_replace)
+	target = f"file:{db_path}?mode=ro" if read_only else str(db_path)
+	conn = await libsql_compat.aconnect(target, timeout=15, detect_types=sqlite3.PARSE_DECLTYPES)
 	for pragma, value in PRAGMAS.items():
-		await conn.execute(f"PRAGMA {pragma}={value}")
+		cursor = await conn.execute(f"PRAGMA {pragma}={value}")
+		await cursor.fetchall()  # libsql: drain so commit isn't blocked
 	return conn

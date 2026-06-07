@@ -26,7 +26,6 @@ ARCHITECTURE_KEYS = (
 	"db_pool_acquire_timeout",
 	"in_process_scheduler",
 	"cache_backend",
-	"sqlite_engine",
 	"asgi_pool_size",
 	"asgi_limit_concurrency",
 	"asgi_thread_stack",

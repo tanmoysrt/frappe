@@ -1,7 +1,6 @@
 import re
 import sqlite3
 import warnings
-from datetime import date, datetime, time
 from pathlib import Path
 
 import frappe
@@ -104,9 +103,9 @@ class SQLiteDatabase(SQLiteExceptionUtil, Database):
 	MAX_ROW_SIZE_LIMIT = None
 
 	def get_connection(self, read_only: bool = False):
+		# REGEXP is native in libsql; regexp_replace has no engine equivalent
+		# (the binding has no create_function) — see libsql_compat
 		conn = self.create_connection(read_only)
-		conn.create_function("regexp", 2, regexp)
-		conn.create_function("regexp_replace", 3, regexp_replace)
 		pragmas = {
 			"journal_mode": "WAL",
 			"synchronous": "NORMAL",
@@ -119,18 +118,17 @@ class SQLiteDatabase(SQLiteExceptionUtil, Database):
 		return conn
 
 	def create_connection(self, read_only: bool = False):
+		"""libsql engine (Phase 22) — the only engine for the main DB.
+
+		sqlite3-shaped via the compat adapter: exception mapping onto the
+		stdlib sqlite3 classes, Row, decltype-driven type conversion. The
+		stdlib sqlite3 *driver* is not used here (its exception classes
+		are, for the unchanged error-matching above)."""
+		from frappe.database.sqlite import libsql_compat
+
 		db_path = self.get_db_path()
-		sqlite3.register_converter("timestamp", lambda x: datetime.fromisoformat(x.decode()))
-		sqlite3.register_converter("date", lambda x: date.fromisoformat(x.decode()))
-		sqlite3.register_converter("time", lambda x: time.fromisoformat(x.decode()))
-		if read_only:
-			return sqlite3.connect(
-				f"file:{db_path}?mode=ro",
-				uri=True,
-				detect_types=sqlite3.PARSE_DECLTYPES,
-				timeout=15,
-			)
-		return sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES, timeout=15)
+		target = f"file:{db_path}?mode=ro" if read_only else str(db_path)
+		return libsql_compat.connect(target, timeout=15, detect_types=sqlite3.PARSE_DECLTYPES)
 
 	def get_db_path(self):
 		return Path(frappe.get_site_path()) / "db" / f"{self.cur_db_name}.db"
