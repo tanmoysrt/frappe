@@ -78,6 +78,13 @@ def memstats(top: int = 0) -> dict:
 				cc[attr] = getattr(client_cache, attr)
 		stats["client_cache"] = cc
 
+	# Phase 25.1: libsql decltype-map rebuild counter (only meaningful on a
+	# sqlite/libsql site). A healthy process plateaus; a climbing count means
+	# real columns keep appearing unknown (DDL churn or a gate bug).
+	libsql = sys.modules.get("frappe.database.sqlite.libsql_compat")
+	if libsql is not None:
+		stats["libsql_decltype_rebuilds"] = getattr(libsql, "_decltype_rebuilds", None)
+
 	if top > 0:
 		import tracemalloc
 

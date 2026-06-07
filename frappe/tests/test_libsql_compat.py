@@ -173,3 +173,50 @@ class TestLibsqlCompat(UnitTestCase):
 			await conn.close()
 
 		asyncio.run(run())
+
+	def test_decltype_rebuild_gated_on_real_columns(self):
+		# Phase 25.1: alias/expression result columns must NOT trigger the full
+		# schema rescan; a new real column (DDL) still does.
+		self.conn.execute("INSERT INTO t (b, ts) VALUES ('r', '2020-01-01 00:00:00')")
+		self.conn.commit()
+		cur = self.conn.cursor()
+		# warm the schema map AND let the aliases get memoized as absent once
+		cur.execute("SELECT a, b FROM t")
+		cur.fetchall()
+		cur.execute("SELECT count(a) AS total, max(ts) AS mx FROM t")
+		cur.fetchall()
+		base = libsql_compat._decltype_rebuilds
+
+		# repeated alias/expression columns — zero further rebuilds
+		for _ in range(10):
+			cur.execute("SELECT count(a) AS total, max(ts) AS mx FROM t")
+			cur.fetchall()
+		self.assertEqual(
+			libsql_compat._decltype_rebuilds - base,
+			0,
+			"repeated alias/expression columns should not trigger a decltype rescan",
+		)
+
+		# a genuinely new real column (ALTER) DOES rebuild
+		self.conn.execute("ALTER TABLE t ADD COLUMN newcol date")
+		self.conn.commit()
+		cur.execute("SELECT newcol FROM t")
+		cur.fetchall()
+		self.assertGreater(
+			libsql_compat._decltype_rebuilds - base,
+			0,
+			"a new real column should trigger exactly one rescan",
+		)
+
+	def test_decltype_conversion_unchanged_by_caching(self):
+		# per-cursor name/decltype caching must not break ISO type conversion
+		self.conn.execute(
+			"INSERT INTO t (b, ts, d, tm) VALUES ('c', '2021-06-07 08:09:10', '2021-06-07', '08:09:10')"
+		)
+		self.conn.commit()
+		cur = self.conn.cursor()
+		cur.execute("SELECT ts, d, tm FROM t WHERE b='c'")
+		row = cur.fetchone()
+		self.assertIsInstance(row[0], datetime)
+		self.assertIsInstance(row[1], date)
+		self.assertIsInstance(row[2], time)

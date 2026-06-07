@@ -50,8 +50,26 @@ _TIME_RE = re.compile(r"^\d{2}:\d{2}:\d{2}(\.\d{1,6})?$")
 _CONVERTED_DECLTYPES = ("timestamp", "date", "time")
 
 # per-database-file column->decltype maps (schema is stable across the
-# per-request connection churn; rebuilt when an unknown column appears)
+# per-request connection churn; rebuilt when an unknown REAL column appears).
+# Holds ONLY real schema columns — aliases/expressions are never inserted here,
+# so a rebuild can't evict them (the bug that made two alternating bare-alias
+# names like `total`/`m` ping-pong-rebuild forever).
 _decltype_maps: dict[str, dict[str, str | None]] = {}
+
+# per-database-file set of names a rescan already failed to resolve (aliases,
+# expressions, bare-identifier `AS` aliases). Memoized so they never trigger
+# another full rescan — they get no type conversion (same as stdlib aliases).
+_decltype_absent: dict[str, set[str]] = {}
+
+# Phase 25.1: a full schema rescan only makes sense for a real column. Aliases
+# and expressions (`count(name)`, `sum(x) AS total`, `a.b`) are never in the
+# schema, so they must NOT trigger the 276-table sqlite_master rescan — they go
+# straight to None (no conversion). Only a bare SQL identifier can be a column.
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+# observability: how many times the full schema map was rebuilt (memstats reads
+# this — a healthy serving process should plateau, not climb per request).
+_decltype_rebuilds = 0
 
 # ValueError message -> sqlite3 exception class (libsql raises bare
 # ValueError for everything; sqlite error strings are stable across forks)
@@ -151,6 +169,11 @@ class Cursor:
 		self.connection = connection
 		self.arraysize = 1
 		self._live = False  # statement executed but maybe not fully stepped
+		# Phase 25.1: column names + decltypes are stable for the lifetime of one
+		# statement (description doesn't change row-to-row). Cache them per
+		# execute() instead of rebuilding the lists on every fetched row.
+		self._names_cache = None
+		self._decltypes_cache = None
 		connection._cursors.add(self)
 
 	# -- passthrough metadata ------------------------------------------------
@@ -168,12 +191,15 @@ class Cursor:
 		return self._raw.rowcount
 
 	def _names(self):
-		description = self._raw.description
-		return [column[0] for column in description] if description else []
+		if self._names_cache is None:
+			description = self._raw.description
+			self._names_cache = [column[0] for column in description] if description else []
+		return self._names_cache
 
 	# -- execution -----------------------------------------------------------
 
 	def execute(self, sql, parameters=()):
+		self._names_cache = self._decltypes_cache = None  # new statement, new columns
 		try:
 			self._raw.execute(sql, _adapt_params(parameters) if parameters else ())
 		except Exception as e:
@@ -182,6 +208,7 @@ class Cursor:
 		return self
 
 	def executemany(self, sql, seq_of_parameters):
+		self._names_cache = self._decltypes_cache = None
 		try:
 			self._raw.executemany(sql, [_adapt_params(p) for p in seq_of_parameters])
 		except Exception as e:
@@ -201,7 +228,9 @@ class Cursor:
 		if row is None:
 			return None
 		if self.connection.detect_types:
-			decltypes = self.connection._column_decltypes(self._names())
+			if self._decltypes_cache is None:
+				self._decltypes_cache = self.connection._column_decltypes(self._names())
+			decltypes = self._decltypes_cache
 			converted = tuple(
 				_convert_by_decltype(value, decltype) if decltype else value
 				for value, decltype in zip(row, decltypes, strict=False)
@@ -278,6 +307,8 @@ class Connection:
 		self._lock = threading.RLock()  # libsql conns are not thread-proven
 
 	def _build_decltype_map(self) -> dict[str, str | None]:
+		global _decltype_rebuilds
+		_decltype_rebuilds += 1
 		decltype_map: dict[str, str | None] = {}
 		cursor = self._raw.cursor()
 		cursor.execute(
@@ -297,19 +328,39 @@ class Connection:
 		DATABASE FILE (connections churn per request; the schema doesn't),
 		refreshed when an unknown column name shows up — covers DDL. A name
 		declared with DIFFERENT types across tables maps to None (no
-		conversion) rather than guessing."""
-		decltype_map = self._decltype_map
-		if decltype_map is None and self._database:
-			decltype_map = _decltype_maps.get(self._database)
-		if decltype_map is None or any(n not in decltype_map for n in names):
-			decltype_map = self._build_decltype_map()
-			# unknown names stay unknown after a rebuild (aliases, expressions)
-			for name in names:
-				decltype_map.setdefault(name, None)
+		conversion) rather than guessing.
+
+		Phase 25.1: only a name that LOOKS like a real column (bare identifier)
+		may trigger the full schema rescan. Aliases/expressions
+		(`count(name)`, `sum(x) AS total`, `a.b`) are never in the schema, so a
+		rescan would churn 276 tables and find nothing — they go straight to
+		None. Real `ALTER TABLE ADD COLUMN` columns are bare identifiers, so DDL
+		is still picked up."""
+		schema_map = self._decltype_map
+		if schema_map is None and self._database:
+			schema_map = _decltype_maps.get(self._database)
+		absent = _decltype_absent.setdefault(self._database, set()) if self._database else set()
+
+		# Rescan only when a name is (a) absent from the schema map, (b) not
+		# already memoized as a non-column, and (c) shaped like a real column.
+		# A bare-identifier alias (`count(x) AS total`) passes (c) but a rescan
+		# won't find it; after one failed rescan it lands in `absent` and never
+		# rescans again.
+		def needs_rescan():
+			if schema_map is None:
+				return True
+			return any(n not in schema_map and n not in absent and _IDENT_RE.match(n) for n in names)
+
+		if needs_rescan():
+			schema_map = self._build_decltype_map()  # real columns only
 			if self._database:
-				_decltype_maps[self._database] = decltype_map
-		self._decltype_map = decltype_map
-		return [decltype_map.get(n) for n in names]
+				_decltype_maps[self._database] = schema_map
+			for name in names:
+				if name not in schema_map:
+					absent.add(name)  # alias/expression — memo so we don't rescan it
+
+		self._decltype_map = schema_map
+		return [schema_map.get(n) for n in names]
 
 	def cursor(self):
 		return Cursor(self._raw.cursor(), self)
