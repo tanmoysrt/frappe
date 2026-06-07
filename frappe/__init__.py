@@ -1582,6 +1582,7 @@ from frappe.model.document import (
 	_set_document_in_cache,
 )
 from frappe.model.meta import get_meta
+import frappe.aio as aio  # awaitable ORM facade: await frappe.aio.get_doc(...)
 from frappe.realtime import publish_progress, publish_realtime
 from frappe.utils import get_traceback, mock, parse_json, safe_eval, create_folder
 from frappe.utils.background_jobs import enqueue, enqueue_doc
