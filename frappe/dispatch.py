@@ -21,6 +21,7 @@ the whole process.
 """
 
 import asyncio
+import gc
 import inspect
 import os
 import threading
@@ -160,6 +161,42 @@ def get_bridge_loop() -> asyncio.AbstractEventLoop:
 def _run_bridge_loop(loop):
 	register_loop_thread()
 	loop.run_forever()
+
+
+def _bridge_loop_if_running():
+	"""The bridge loop iff it's live for this pid — never starts one."""
+	loop = _bridge["loop"]
+	if loop is not None and _bridge["pid"] == os.getpid() and not loop.is_closed():
+		return loop
+	return None
+
+
+async def _gc_collect():
+	return gc.collect()
+
+
+async def gc_collect_safe():
+	"""``gc.collect()`` whose finalizers run on the bridge-loop thread.
+
+	The async DB drivers (aiomysql) keep their connections on the bridge loop;
+	a connection's teardown chain (Connection -> StreamWriter -> transport ->
+	``loop._remove_reader``/``_remove_writer``) mutates that loop's selector.
+	asyncio selectors are NOT thread-safe, so running that finalization from any
+	other thread — the server's 30s idle-trim tick, or any thread that happens
+	to trip an automatic collection — corrupts the bridge loop's epoll state
+	mid-I/O and wedges every DB call funnelling through it (reproduced:
+	gc.collect() on the main loop thread hard-hangs all DB I/O). Confine the
+	collection (and therefore the finalizers) to the bridge-loop thread.
+
+	Awaitable and non-blocking for the caller's loop: it hands the collection to
+	the bridge loop and awaits the result via a wrapped future. Falls back to an
+	inline collect when no bridge loop is running (sqlite light mode never
+	starts one — aiosqlite uses a worker thread + queue, not a loop selector, so
+	it has no cross-thread teardown hazard)."""
+	loop = _bridge_loop_if_running()
+	if loop is None or loop is asyncio.get_running_loop():
+		return gc.collect()
+	return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_gc_collect(), loop))
 
 
 def run_coroutine_sync(coro):

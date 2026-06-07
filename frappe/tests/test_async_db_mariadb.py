@@ -163,3 +163,66 @@ class TestAsyncMariaDB(IntegrationTestCase):
 		aio.shutdown_pools()
 		self.assertFalse(aio._reg()["pools"])
 		aio.shutdown_pools()  # second call: no-op, no error
+
+	def test_gc_collect_safe_does_not_wedge_bridge_loop(self):
+		"""Phase 26 regression: aiomysql transport teardown (Connection ->
+		StreamWriter -> transport -> loop._remove_reader/_remove_writer) mutates
+		the bridge loop's selector, which is not thread-safe. A bare
+		``gc.collect()`` from any non-bridge thread (the server's 30s idle-trim
+		ran on the main uvicorn loop) corrupts the selector mid-I/O and hangs
+		every DB call. ``frappe.dispatch.gc_collect_safe`` confines the collect
+		(and its finalizers) to the bridge-loop thread. Under concurrent queries
+		plus a thread hammering gc_collect_safe, all work must finish — a wedged
+		loop would leave worker threads alive past the deadline."""
+		import asyncio
+		import threading
+		import time
+
+		from frappe.dispatch import gc_collect_safe, get_bridge_loop
+
+		self.db.sql("SELECT 1")  # ensure a pool + the bridge loop exist
+		loop = get_bridge_loop()
+		site = frappe.local.site
+		stop = threading.Event()
+		errors = []
+
+		def worker():
+			# each thread is its own "request": fresh frappe.local + pooled conn,
+			# released on destroy (mirrors the ASGI per-request lifecycle)
+			try:
+				for _ in range(40):
+					frappe.init(site, force=True)
+					try:
+						frappe.connect()
+						frappe.get_all("User", fields=["name"], limit=5)
+						frappe.db.commit()
+					finally:
+						frappe.destroy()
+			except Exception as e:  # noqa: BLE001
+				errors.append(repr(e))
+
+		def gc_driver():
+			# the real fix, driven from the bridge loop: gc_collect_safe sees
+			# get_running_loop()==bridge and collects loop-local
+			while not stop.is_set():
+				try:
+					asyncio.run_coroutine_threadsafe(gc_collect_safe(), loop).result(timeout=10)
+				except Exception as e:  # noqa: BLE001
+					errors.append(f"gc_collect_safe: {e!r}")
+					return
+
+		# daemon threads: if the fix ever regresses and the loop wedges, the test
+		# fails on the deadline instead of hanging the whole runner
+		workers = [threading.Thread(target=worker, daemon=True) for _ in range(8)]
+		gct = threading.Thread(target=gc_driver, daemon=True)
+		gct.start()
+		for t in workers:
+			t.start()
+		end = time.monotonic() + 30
+		for t in workers:
+			t.join(timeout=max(0, end - time.monotonic()))
+		stop.set()
+
+		alive = [t.name for t in workers if t.is_alive()]
+		self.assertFalse(alive, f"bridge loop wedged — workers stuck on DB I/O: {alive}")
+		self.assertFalse(errors, f"async DB errored under concurrent gc_collect_safe: {errors}")

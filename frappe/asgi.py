@@ -241,7 +241,10 @@ async def _lifespan(scope, receive, send):
 			# controllers populated by the first requests. Safe under no-GIL.
 			import gc
 
-			gc.collect()
+			# preload_configured_backends may have opened pooled connections on
+			# the bridge loop; run the collect there (gc_collect_safe) so their
+			# finalizers never touch the loop selector cross-thread.
+			await frappe.dispatch.gc_collect_safe()
 			gc.freeze()
 			await send({"type": "lifespan.startup.complete"})
 		elif message["type"] == "lifespan.shutdown":
@@ -406,7 +409,10 @@ def serve(port=None, site=None, sites_path=".", proxy=False):
 		warmed_up = False
 		while True:
 			await asyncio.sleep(trim_interval)
-			gc.collect()
+			# gc.collect() finalizers must run on the bridge-loop thread: a bare
+			# gc.collect() here (this is the main uvicorn loop thread) would tear
+			# down aiomysql transports cross-thread and wedge all DB I/O.
+			await frappe.dispatch.gc_collect_safe()
 			# Phase 24.7: one-shot freeze after the first warmup cycle — by now
 			# the initial requests have populated meta/controllers; move that
 			# now-stable graph out of GC scanning too (lifespan startup already
