@@ -505,8 +505,10 @@ def serve(
 		# picked up by frappe.asgi._build_wsgi_app on first import
 		os.environ["USE_PROFILER"] = "1"
 
-	import frappe.asgi
+	import frappe.serve
 
-	frappe.asgi.serve(port=port, site=site, sites_path=sites_path, proxy=proxy)
+	# bench serve = dev: the runtime only, no malloc/GIL re-exec (that's
+	# frappe.serve.main, used by `python -m frappe.serve` in production)
+	frappe.serve.serve(port=port, site=site, sites_path=sites_path, proxy=proxy)
 
 
