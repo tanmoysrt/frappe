@@ -73,6 +73,15 @@ def get_queues_timeout() -> dict[str, int]:
 	}
 
 
+def get_queue_backend() -> str:
+	"""Per-site queue backend (Phase 9): "rq" (default) or "sqlite".
+
+	"sqlite" = in-process asyncio workers on a bench-local SQLite file —
+	no worker processes, no queue Redis (frappe.utils.sqlite_queue).
+	"""
+	return frappe.conf.get("queue_backend") or "rq"
+
+
 def enqueue(
 	method: str | Callable,
 	queue: str = "default",
@@ -117,17 +126,21 @@ def enqueue(
 	# To handle older implementations
 	is_async = kwargs.pop("async", is_async)
 
+	backend = get_queue_backend()
+
 	if deduplicate:
 		if not job_id:
 			frappe.throw(_("`job_id` paramater is required for deduplication."))
-		job = get_job(job_id)
-		if job and job.get_status(refresh=False) in (JobStatus.QUEUED, JobStatus.STARTED):
-			frappe.logger().error(f"Not queueing job {job.id} because it is in queue already")
-			return
-		elif job:
-			# delete job to avoid argument issues related to job args
-			# https://github.com/rq/rq/issues/793
-			job.delete()
+		if backend == "rq":
+			job = get_job(job_id)
+			if job and job.get_status(refresh=False) in (JobStatus.QUEUED, JobStatus.STARTED):
+				frappe.logger().error(f"Not queueing job {job.id} because it is in queue already")
+				return
+			elif job:
+				# delete job to avoid argument issues related to job args
+				# https://github.com/rq/rq/issues/793
+				job.delete()
+		# sqlite backend: job_id is a UNIQUE column — dedup happens in the INSERT
 
 		# If job exists and is completed then delete it before re-queue
 
@@ -153,6 +166,33 @@ def enqueue(
 	call_directly = now or (not is_async and not frappe.in_test)
 	if call_directly:
 		return frappe.call(method, **kwargs)
+
+	if backend == "sqlite":
+		from frappe.utils import sqlite_queue
+
+		if isinstance(method, Callable):
+			method_name = f"{method.__module__}.{method.__qualname__}"
+		else:
+			method_name = method
+
+		queue_args = {
+			"site": frappe.local.site,
+			"user": frappe.session.user,
+			"method": method,
+			"event": event,
+			"job_name": job_name or method_name,
+			"is_async": is_async,
+			"kwargs": kwargs,
+		}
+
+		def enqueue_sqlite():
+			return sqlite_queue.enqueue_job(queue_args, queue=queue, job_id=job_id)
+
+		if enqueue_after_commit:
+			frappe.db.after_commit.add(enqueue_sqlite)
+			return
+
+		return enqueue_sqlite()
 
 	try:
 		q = get_queue(queue, is_async=is_async)
@@ -670,6 +710,10 @@ def create_job_id(job_id: str | None = None) -> str:
 
 
 def is_job_enqueued(job_id: str) -> bool:
+	if get_queue_backend() == "sqlite":
+		from frappe.utils import sqlite_queue
+
+		return sqlite_queue.is_job_enqueued(create_job_id(job_id))
 	return get_job_status(job_id) in (JobStatus.QUEUED, JobStatus.STARTED)
 
 
@@ -682,7 +726,7 @@ def get_job_status(job_id: str) -> JobStatus | None:
 def get_job(job_id: str) -> Job | None:
 	try:
 		return Job.fetch(create_job_id(job_id), connection=get_redis_conn())
-	except (NoSuchJobError, InvalidJobOperation):
+	except NoSuchJobError, InvalidJobOperation:
 		return None
 
 

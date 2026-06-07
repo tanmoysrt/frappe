@@ -70,9 +70,16 @@ async def _lifespan(scope, receive, send):
 			# fail-fast guard (Phase 8): a sync frappe.db call on this thread
 			# would block the whole process — Database.sql raises instead
 			frappe.dispatch.register_loop_thread()
-			# later phases start queue workers / scheduler tick tasks here
+			# SQLite queue workers (Phase 9): asyncio tasks on this loop,
+			# idle-cheap when no site uses queue_backend "sqlite"
+			from frappe.utils import sqlite_queue
+
+			await sqlite_queue.start_workers()
 			await send({"type": "lifespan.startup.complete"})
 		elif message["type"] == "lifespan.shutdown":
+			from frappe.utils import sqlite_queue
+
+			await sqlite_queue.stop_workers()
 			# close per-site DB pools (Phase 6); they live on the bridge
 			# loop, so go through a pool thread -> run_coroutine_sync
 			await sync_to_async(_shutdown_db_pools, thread_sensitive=False)()
