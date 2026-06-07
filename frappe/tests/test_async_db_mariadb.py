@@ -10,6 +10,7 @@ closing cold pools, shutdown.
 import time
 
 import frappe
+from frappe.config import patch_common_conf
 from frappe.database.mariadb import aio
 from frappe.dispatch import run_coroutine_sync
 from frappe.tests import IntegrationTestCase
@@ -41,8 +42,6 @@ class TestAsyncMariaDB(IntegrationTestCase):
 	def tearDown(self):
 		self.db.close()
 		aio.shutdown_pools()
-		frappe.conf.pop("db_pool_size", None)
-		frappe.conf.pop("db_pool_acquire_timeout", None)
 
 	def test_basic_sql(self):
 		self.db.sql("SELECT 1")
@@ -68,8 +67,8 @@ class TestAsyncMariaDB(IntegrationTestCase):
 		db2.close()
 
 	def test_acquire_timeout_raises_503(self):
-		frappe.conf.db_pool_size = 1
-		frappe.conf.db_pool_acquire_timeout = 1
+		# Phase 19: pool knobs come from common config only
+		self.enterContext(patch_common_conf(db_pool_size=1, db_pool_acquire_timeout=1))
 		self.db.sql("SELECT 1")  # holds the only connection
 		db2 = make_db()
 		with self.assertRaises(aio.PoolAcquireTimeoutError) as ctx:
