@@ -113,10 +113,14 @@ Documentation = "https://docs.frappe.io/framework"
 # upstream while frappe needs redis~=7.1 — round-trip smoke-tested fine on
 # redis-py 7.x; install with --no-deps until the upstream pin is relaxed.
 arq = ["arq~=0.28.0"]
-# psycopg2 is lazily imported (database/postgres/database.py) and only
-# needed when a site uses db_type "postgres". It has no free-threaded
-# cp314t wheel (Phase 23), so it is opt-in rather than a core dependency.
-postgres = ["psycopg2-binary~=2.9.11"]
+# postgres support is opt-in: psycopg2-binary (sync path + escape/QuotedString)
+# and psycopg3 (async path, AsyncPostgresDatabase). Neither has a free-threaded
+# cp314t wheel (Phase 23) and psycopg2-binary re-enables the GIL, so a postgres
+# bench can't run no-GIL — kept out of the core deps for that reason.
+postgres = [
+    "psycopg2-binary~=2.9.11",
+    "psycopg[binary,pool]~=3.3.4",
+]
 dev = [
     "pyngrok~=7.5.0",
     "watchdog~=6.0.0",

@@ -66,6 +66,13 @@ def get_db(socket=None, host=None, user=None, password=None, port=None, cur_db_n
 	conf = frappe.local.conf
 
 	if conf.db_type == "postgres":
+		if frappe.get_common_conf("use_async_db"):
+			import frappe.database.postgres.aio
+
+			return frappe.database.postgres.aio.AsyncPostgresDatabase(
+				socket, host, user, password, port, cur_db_name
+			)
+
 		import frappe.database.postgres.database
 
 		return frappe.database.postgres.database.PostgresDatabase(
