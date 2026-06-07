@@ -1,8 +1,5 @@
 from contextvars import ContextVar
-from typing import Any, Generic, TypeVar
-
-from werkzeug.local import LocalProxy as WerkzeugLocalProxy
-from werkzeug.local import release_local as release_werkzeug_local
+from typing import Any, TypeVar
 
 _contextvar = ContextVar("frappe_local")
 
@@ -59,13 +56,23 @@ class Local:
 		return lp
 
 
-class LocalProxy[T](WerkzeugLocalProxy):
-	__slots__ = ()
+class LocalProxy[T]:
+	"""Vendored werkzeug.local.LocalProxy (Phase 20): forwards everything to
+	the object returned by `_get_current_object`. The storage is frappe's
+	ContextVar dict above — only the proxy class was ever borrowed."""
+
+	__slots__ = ("_get_current_object",)
+
+	def __init__(self, get_current_object=None) -> None:
+		if get_current_object is not None:
+			object.__setattr__(self, "_get_current_object", get_current_object)
+
+	# --- attribute / item forwarding ---------------------------------------
 
 	def __getattr__(self, name: str) -> Any:
 		return getattr(self._get_current_object(), name)
 
-	def __setattr__(self, name: str, value: str) -> None:
+	def __setattr__(self, name: str, value: Any) -> None:
 		setattr(self._get_current_object(), name, value)
 
 	def __delattr__(self, name: str) -> None:
@@ -74,11 +81,24 @@ class LocalProxy[T](WerkzeugLocalProxy):
 	def __getitem__(self, key: str) -> Any:
 		return self._get_current_object()[key]
 
-	def __setitem__(self, key: str, value: str) -> None:
+	def __setitem__(self, key: str, value: Any) -> None:
 		self._get_current_object()[key] = value
 
 	def __delitem__(self, key: str) -> None:
 		del self._get_current_object()[key]
+
+	# --- common dunders werkzeug forwarded that frappe code relies on -------
+
+	@property  # type: ignore[misc]
+	def __class__(self):
+		try:
+			return type(self._get_current_object())
+		except RuntimeError:
+			return LocalProxy
+
+	@property
+	def __dict__(self):
+		return self._get_current_object().__dict__
 
 	def __bool__(self) -> bool:
 		try:
@@ -89,8 +109,47 @@ class LocalProxy[T](WerkzeugLocalProxy):
 	def __contains__(self, key: str) -> bool:
 		return key in self._get_current_object()
 
+	def __iter__(self):
+		return iter(self._get_current_object())
+
+	def __len__(self):
+		return len(self._get_current_object())
+
+	def __eq__(self, other) -> bool:
+		try:
+			return self._get_current_object() == other
+		except RuntimeError:
+			return NotImplemented
+
+	def __ne__(self, other) -> bool:
+		try:
+			return self._get_current_object() != other
+		except RuntimeError:
+			return NotImplemented
+
+	def __hash__(self):
+		return hash(self._get_current_object())
+
+	def __call__(self, *args, **kwargs):
+		return self._get_current_object()(*args, **kwargs)
+
 	def __str__(self) -> str:
 		return str(self._get_current_object())
+
+	def __repr__(self) -> str:
+		try:
+			return repr(self._get_current_object())
+		except RuntimeError:
+			return f"<{type(self).__name__} unbound>"
+
+	def __dir__(self):
+		try:
+			return dir(self._get_current_object())
+		except RuntimeError:
+			return []
+
+	def __instancecheck__(self, other):
+		return isinstance(other, self._get_current_object())
 
 
 def release_local(local):
@@ -98,7 +157,7 @@ def release_local(local):
 		_contextvar.set({})
 		return
 
-	release_werkzeug_local(local)
+	raise TypeError(f"cannot release {local!r}")
 
 
 # _local_attributes = frozenset(attr for attr in dir(Local))
