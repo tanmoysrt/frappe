@@ -106,7 +106,7 @@ _task_state = {"task": None, "lock": None}
 
 
 def in_process_scheduler_enabled() -> bool:
-	return cint(frappe.get_conf().get("in_process_scheduler", 1)) == 1
+	return cint(frappe.get_common_conf("in_process_scheduler", 1)) == 1
 
 
 def start_scheduler_task() -> None:

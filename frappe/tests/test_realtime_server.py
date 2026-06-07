@@ -18,6 +18,7 @@ from asgiref.sync import sync_to_async
 
 import frappe
 from frappe import realtime_server
+from frappe.config import patch_common_conf
 from frappe.tests import AsyncIntegrationTestCase, IntegrationTestCase
 
 
@@ -123,16 +124,13 @@ class TestRealtimeRouting(AsyncIntegrationTestCase):
 	async def test_node_revert_flag_forces_redis(self):
 		emit = AsyncMock()
 		conn = MagicMock()
-		frappe.conf["use_node_realtime"] = 1
-		try:
-			with (
-				patch.dict(realtime_server._state, {"loop": asyncio.get_running_loop(), "pid": os.getpid()}),
-				patch.object(realtime_server.sio, "emit", emit),
-				patch("frappe.utils.background_jobs.get_redis_connection_without_auth", return_value=conn),
-			):
-				await self._publish()
-				await asyncio.sleep(0.1)
-		finally:
-			del frappe.conf["use_node_realtime"]
+		with (
+			patch_common_conf(use_node_realtime=1),
+			patch.dict(realtime_server._state, {"loop": asyncio.get_running_loop(), "pid": os.getpid()}),
+			patch.object(realtime_server.sio, "emit", emit),
+			patch("frappe.utils.background_jobs.get_redis_connection_without_auth", return_value=conn),
+		):
+			await self._publish()
+			await asyncio.sleep(0.1)
 		emit.assert_not_awaited()
 		conn.publish.assert_called_once()

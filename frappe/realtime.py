@@ -111,7 +111,7 @@ def emit_via_redis(event, message, room):
 	:param event: Event name, like `task_progress` etc.
 	:param message: JSON message object. For async must contain `task_id`
 	:param room: name of the room"""
-	if not frappe.conf.use_node_realtime:
+	if not frappe.get_common_conf("use_node_realtime"):
 		try:
 			from frappe import realtime_server
 		except ImportError:  # python-socketio not installed -> Redis/Node path
