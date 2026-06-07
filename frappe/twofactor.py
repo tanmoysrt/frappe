@@ -11,7 +11,6 @@ import frappe.defaults
 from frappe import _
 from frappe.permissions import ALL_USER_ROLE
 from frappe.utils import cint, get_datetime, get_url, time_diff_in_seconds
-from frappe.utils.background_jobs import enqueue
 from frappe.utils.password import decrypt, encrypt
 
 PARENT_FOR_DEFAULTS = "__2fa"
@@ -329,7 +328,7 @@ def send_token_via_sms(otpsecret, token=None, phone_no=None):
 	args[ss.receiver_parameter] = phone_no
 
 	sms_args = {"params": args, "gateway_url": ss.sms_gateway_url, "use_post": ss.use_post}
-	enqueue(
+	frappe.enqueue(
 		method=send_request,
 		queue="short",
 		timeout=300,
@@ -464,7 +463,7 @@ def reset_otp_secret(user: str):
 		"retry": 3,
 	}
 
-	enqueue(
+	frappe.enqueue(
 		method=frappe.sendmail,
 		queue="short",
 		timeout=300,

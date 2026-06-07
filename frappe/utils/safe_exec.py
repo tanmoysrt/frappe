@@ -30,7 +30,8 @@ from frappe.model.delete_doc import delete_doc
 from frappe.model.mapper import get_mapped_doc
 from frappe.model.rename_doc import rename_doc
 from frappe.modules import scrub
-from frappe.utils.background_jobs import enqueue, get_jobs
+# Phase 25.0: enqueue/get_jobs pull rq+redis; imported function-level so
+# preloading safe_exec (hot — server scripts) doesn't drag the queue backend in.
 from frappe.utils.caching import site_cache
 from frappe.utils.inplacevar import protected_inplacevar
 from frappe.utils.number_format import NumberFormat
@@ -374,6 +375,8 @@ def is_job_queued(job_name, queue="default"):
 	:param queue: should be either long, default or short
 	"""
 
+	from frappe.utils.background_jobs import get_jobs
+
 	site = frappe.local.site
 	queued_jobs = get_jobs(site=site, queue=queue, key="job_name").get(site)
 	return queued_jobs and job_name in queued_jobs
@@ -387,6 +390,7 @@ def safe_enqueue(function, **kwargs):
 
 	:param function: whitelisted function or API Method set in Server Script
 	"""
+	from frappe.utils.background_jobs import enqueue
 
 	return enqueue("frappe.utils.safe_exec.call_whitelisted_function", function=function, **kwargs)
 

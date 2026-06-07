@@ -1,11 +1,17 @@
 # Copyright (c) 2015, Frappe Technologies Pvt. Ltd. and Contributors
 # License: MIT. See LICENSE
+# Phase 25.0: future-annotations frees the BeautifulSoup type hints so bs4 is
+# imported function-level instead of at module load (pdf.py is reachable from
+# the preloaded file.py via pdf_contains_js).
+from __future__ import annotations
+
 import base64
 import contextlib
 import io
 import mimetypes
 import os
 import subprocess
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 import cssutils
@@ -14,7 +20,6 @@ import pdfkit.api
 from pdfkit.pdfkit import PDFKit as OriginalPDFKit
 
 pdfkit.source.unicode = str  # NOTE: upstream bug; PYTHONOPTIMIZE=1 optimized this away
-from bs4 import BeautifulSoup
 from packaging.version import Version
 from pypdf import PdfReader, PdfWriter, errors
 
@@ -25,6 +30,9 @@ from frappe.utils import cstr, scrub_urls
 from frappe.utils.caching import redis_cache
 from frappe.utils.data import get_url
 from frappe.utils.jinja_globals import bundled_asset, is_rtl
+
+if TYPE_CHECKING:
+	from bs4 import BeautifulSoup
 
 cssutils.log.setLog(frappe.logger("cssutils"))
 
@@ -265,6 +273,8 @@ def get_cookie_options():
 
 
 def read_options_from_html(html):
+	from bs4 import BeautifulSoup
+
 	options = {}
 	soup = BeautifulSoup(html, "html5lib")
 
@@ -328,6 +338,8 @@ def get_print_format_styles(soup: BeautifulSoup) -> list[cssutils.css.Property]:
 
 
 def inline_private_images(html) -> str:
+	from bs4 import BeautifulSoup
+
 	soup = BeautifulSoup(html, "html.parser")
 	for img in soup.find_all("img"):
 		if b64 := _get_base64_image(img["src"]):

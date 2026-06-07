@@ -1,7 +1,5 @@
 from typing import Any
 
-import requests
-
 import frappe
 from frappe import _
 
@@ -50,6 +48,8 @@ def current_site_info():
 		return cached_data
 
 	res = {}
+	import requests
+
 	request = requests.post(f"{get_base_url()}/api/method/press.saas.api.site.info", headers=get_headers())
 	if request.status_code == 200:
 		res = request.json().get("message")
@@ -72,6 +72,8 @@ def current_site_info():
 def api(method: str, data: str | dict[str, Any] | None = None):
 	if data is None:
 		data = {}
+	import requests
+
 	request = requests.post(
 		f"{get_base_url()}/api/method/press.saas.api.{method}",
 		headers=get_headers(),
@@ -92,6 +94,8 @@ def is_fc_site() -> bool:
 # login to frappe cloud dashboard
 @frappe.whitelist()
 def send_verification_code():
+	import requests
+
 	request = requests.post(
 		f"{get_base_url()}/api/method/press.api.developer.saas.send_verification_code",
 		headers=get_headers(),
@@ -105,6 +109,8 @@ def send_verification_code():
 
 @frappe.whitelist()
 def verify_verification_code(verification_code: str, route: str):
+	import requests
+
 	request = requests.post(
 		f"{get_base_url()}/api/method/press.api.developer.saas.verify_verification_code",
 		headers=get_headers(),

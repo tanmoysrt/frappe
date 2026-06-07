@@ -3,7 +3,6 @@
 
 from urllib.parse import quote
 
-from rq import get_current_job
 
 import frappe
 from frappe import _
@@ -87,6 +86,8 @@ class SubmissionQueue(Document):
 
 	def background_submission(self, to_be_queued_doc: Document, action_for_queuing: str):
 		# Set the job id for that submission doctype
+		from rq import get_current_job
+
 		self.update_job_id(get_current_job().id)
 
 		_action = action_for_queuing.lower()

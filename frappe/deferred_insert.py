@@ -1,8 +1,6 @@
 import json
 from typing import TYPE_CHECKING, Union
 
-import redis
-
 import frappe
 from frappe.utils import cstr
 
@@ -13,6 +11,8 @@ queue_prefix = "insert_queue_for_"
 
 
 def deferred_insert(doctype: str, records: list[dict | "Document"] | str):
+	import redis
+
 	if isinstance(records, dict | list):
 		_records = json.dumps(records)
 	else:

@@ -1,5 +1,4 @@
 import click
-import requests
 
 import frappe
 from frappe.core.utils import html2text
@@ -8,6 +7,8 @@ from frappe.core.utils import html2text
 def get_remote_script(remote_site):
 	print("Retrieving Site Migrator...")
 	request_url = f"https://{remote_site}/api/method/press.api.script"
+	import requests
+
 	request = requests.get(request_url)
 
 	if request.status_code / 100 != 2:

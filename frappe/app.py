@@ -28,30 +28,30 @@ _site = None
 _sites_path = os.environ.get("SITES_PATH", ".")
 
 
-# If gc.freeze is done then importing modules before forking allows us to share the memory
+# Preload the hot modules so the post-warmup gc.freeze (Phase 24.7) captures
+# them warm. Phase 25.0 diet: backend drivers (rq/redis via background_jobs +
+# redis_wrapper, mysqlclient) are NOT forced here anymore —
+# preload_configured_backends() at lifespan warms exactly what the config
+# selects; num2words is an optional feature (enable_number_to_words) and
+# babel.messages is translation *compile* tooling, never used while serving.
 import gettext
 
 import babel
-import babel.messages
 import nh3
-import num2words
 import pydantic
 
 import frappe.boot
 import frappe.client
 import frappe.core.doctype.file.file
 import frappe.core.doctype.user.user
-import frappe.database.mariadb.mysqlclient  # Load database related utils
 import frappe.database.query
 import frappe.desk.desktop  # workspace
 import frappe.desk.form.save
 import frappe.model.db_query
 import frappe.query_builder
-import frappe.utils.background_jobs  # Enqueue is very common
 import frappe.utils.data  # common utils
 import frappe.utils.jinja  # web page rendering
 import frappe.utils.jinja_globals
-import frappe.utils.redis_wrapper  # Exact redis_wrapper
 import frappe.utils.safe_exec
 import frappe.utils.typing_validations  # any whitelisted method uses this
 import frappe.website.path_resolver  # all the page types and resolver

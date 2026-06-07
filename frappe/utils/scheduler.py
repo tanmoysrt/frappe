@@ -19,7 +19,6 @@ from filelock import FileLock, Timeout
 
 import frappe
 from frappe.utils import cint, get_bench_path, get_datetime, get_sites, now_datetime
-from frappe.utils.background_jobs import set_niceness
 from frappe.utils.caching import redis_cache
 
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -40,6 +39,8 @@ def start_scheduler() -> NoReturn:
 	Specify scheduler_tick_interval in seconds in common_site_config.json"""
 
 	tick = get_scheduler_tick()
+	from frappe.utils.background_jobs import set_niceness
+
 	set_niceness()
 
 	lock_path = _get_scheduler_lock_file()
