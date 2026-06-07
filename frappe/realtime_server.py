@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import contextvars
 import json
+import os
 
 import socketio
 from asgiref.sync import sync_to_async
@@ -47,7 +48,7 @@ sio = socketio.AsyncServer(
 )
 application = socketio.ASGIApp(sio, socketio_path="socket.io")
 
-_state = {"subscriber": None}
+_state = {"subscriber": None, "loop": None, "pid": None}
 
 
 def open_doc_room(doctype, docname):
@@ -242,20 +243,49 @@ async def _notify_doc_viewers(namespace, doctype, docname, exclude_sid=None):
 	)
 
 
+# --- direct emit (Phase 14) ----------------------------------------------------
+#
+# Single process, single loop, every client connected right here — so
+# publish_realtime from this process emits straight onto the loop, no Redis
+# pub/sub. The Redis subscriber below stays for OUT-of-process publishers
+# (bench CLI, RQ workers in heavy mode) and as the Node-revert path.
+
+
+def is_active() -> bool:
+	"""True when the in-process socket.io server runs in THIS process."""
+	loop = _state["loop"]
+	return loop is not None and _state["pid"] == os.getpid() and not loop.is_closed()
+
+
+def emit_threadsafe(event, message, room, site):
+	"""Schedule an emit onto the server loop from any thread (pool threads
+	running requests/jobs, or the loop itself). Fire-and-forget — delivery
+	failures are logged, never raised into the publisher."""
+	asyncio.run_coroutine_threadsafe(_emit(event, message, room, site), _state["loop"])
+
+
+async def _emit(event, message, room, site):
+	try:
+		await sio.emit(event, message, room=room or None, namespace="/" + site)
+	except Exception:
+		frappe.logger("realtime").error("direct realtime emit failed", exc_info=True)
+
+
 # --- redis "events" subscriber -------------------------------------------------
 #
-# publish_realtime still writes to the Redis "events" channel (until Phase
-# 14); this task mirrors realtime/index.js's subscriber so the Python server
-# serves the same events as Node, side by side.
+# Out-of-process publishers (bench CLI, workers) still write to the Redis
+# "events" channel; this task mirrors realtime/index.js's subscriber so
+# those events reach clients connected to this process. Also keeps Python
+# and Node in lockstep while both run.
 
 
 def start():
 	"""Start the events subscriber (ASGI lifespan startup). The task runs in
 	an empty contextvars Context — its redis connection must not pin the
 	startup context."""
-	_state["subscriber"] = asyncio.get_running_loop().create_task(
-		_events_subscriber(), context=contextvars.Context()
-	)
+	_state["loop"] = asyncio.get_running_loop()
+	_state["pid"] = os.getpid()
+	_state["subscriber"] = _state["loop"].create_task(_events_subscriber(), context=contextvars.Context())
 	_state["subscriber"].set_name("frappe-realtime-events")
 
 
@@ -264,7 +294,7 @@ async def stop():
 		task.cancel()
 		with contextlib.suppress(asyncio.CancelledError):
 			await task
-	_state["subscriber"] = None
+	_state.update(subscriber=None, loop=None, pid=None)
 
 
 def _redis_queue_url():

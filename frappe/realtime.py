@@ -98,11 +98,27 @@ def clear_realtime_log():
 
 
 def emit_via_redis(event, message, room):
-	"""Publish real-time updates via redis
+	"""Publish real-time updates.
+
+	Phase 14: when the in-process python socket.io server is running (the
+	single-process light mode), the event goes straight onto its loop —
+	single process, single loop, every client connected here; no Redis
+	pub/sub hop. Out-of-process publishers (bench CLI, RQ workers) and the
+	`use_node_realtime` revert flag keep the Redis path — the in-process
+	subscriber (and Node) pick those up.
 
 	:param event: Event name, like `task_progress` etc.
 	:param message: JSON message object. For async must contain `task_id`
 	:param room: name of the room"""
+	if not frappe.conf.use_node_realtime:
+		try:
+			from frappe import realtime_server
+		except ImportError:  # python-socketio not installed -> Redis/Node path
+			realtime_server = None
+		if realtime_server is not None and realtime_server.is_active():
+			realtime_server.emit_threadsafe(event, message, room, frappe.local.site)
+			return
+
 	from frappe.utils.background_jobs import get_redis_connection_without_auth
 
 	with suppress(redis.exceptions.ConnectionError):
