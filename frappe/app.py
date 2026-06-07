@@ -5,10 +5,6 @@ import functools
 import os
 
 import orjson
-from werkzeug.exceptions import HTTPException, NotFound
-from werkzeug.middleware.shared_data import SharedDataMiddleware
-from werkzeug.wrappers import Request, Response
-from werkzeug.wsgi import ClosingIterator
 
 import frappe
 import frappe.api
@@ -19,8 +15,8 @@ import frappe.recorder
 import frappe.utils.response
 from frappe import _
 from frappe.auth import SAFE_HTTP_METHODS, UNSAFE_HTTP_METHODS, HTTPRequest, check_request_ip, validate_auth
+from frappe.http import HTTPError, NotFound, Request, Response
 from frappe.integrations.oauth2 import get_resource_url, handle_wellknown, is_oauth_metadata_enabled
-from frappe.middlewares import StaticDataMiddleware
 from frappe.permissions import handle_does_not_exist_error
 from frappe.utils import CallbackManager, cint, get_site_name
 from frappe.utils.data import escape_html
@@ -64,35 +60,16 @@ import frappe.website.website_generator  # web page doctypes
 
 # end: module pre-loading
 
-# better werkzeug default
-# this is necessary because frappe desk sends most requests as form data
-# and some of them can exceed werkzeug's default limit of 500kb
-Request.max_form_memory_size = None
 
+def handle_request(request: Request) -> Response:
+	"""Process one HTTP request into a Response (Phase 20: frappe-native,
+	no WSGI environ, no werkzeug). Runs on a pool thread — called by
+	frappe/asgi.py for real traffic and by the test client directly.
 
-def after_response_wrapper(app):
-	"""Wrap a WSGI application to call after_response hooks after we have responded.
-
-	This is done to reduce response time by deferring expensive tasks."""
-
-	@functools.wraps(app)
-	def application(environ, start_response):
-		return ClosingIterator(
-			app(environ, start_response),
-			(
-				frappe.rate_limiter.update,
-				frappe.recorder.dump,
-				frappe.request.after_response.run,
-				frappe.destroy,
-			),
-		)
-
-	return application
-
-
-@after_response_wrapper
-@Request.application
-def application(request: Request):
+	After-response work (rate limiter, recorder, after_response callbacks,
+	frappe.destroy) is NOT run here: the caller runs `after_response_tasks`
+	after the terminal send (the old ClosingIterator semantics, kept
+	explicit)."""
 	response = None
 
 	try:
@@ -139,7 +116,11 @@ def application(request: Request):
 			raise NotFound
 
 	except Exception as e:
-		response = e.get_response(request.environ) if isinstance(e, HTTPException) else handle_exception(e)
+		if isinstance(e, HTTPError) and not getattr(frappe.local, "initialised", False):
+			# site doesn't exist / failed before init — no db, no error pages
+			response = _plain_error_response(e)
+		else:
+			response = handle_exception(e)
 		if db := getattr(frappe.local, "db", None):
 			db.rollback(chain=True)
 
@@ -161,6 +142,34 @@ def application(request: Request):
 	process_response(response)
 
 	return response
+
+
+def after_response_tasks():
+	"""Per-request epilogue, exactly once, after (or while) the response is
+	sent — the explicit replacement for werkzeug's ClosingIterator chain.
+	Order is load-bearing (5d03cf5bba): runs BEFORE the terminal ASGI send
+	so cleanup can't lag behind new requests in the FIFO pool."""
+	for task in (
+		frappe.rate_limiter.update,
+		frappe.recorder.dump,
+		_run_request_after_response_callbacks,
+		frappe.destroy,
+	):
+		try:
+			task()
+		except Exception:
+			pass
+
+
+def _run_request_after_response_callbacks():
+	if request := getattr(frappe.local, "request", None):
+		if after_response := getattr(request, "after_response", None):
+			after_response.run()
+
+
+def _plain_error_response(e: HTTPError) -> Response:
+	body = f"<!doctype html>\n<title>{e.http_status_code} {e.description}</title>\n<h1>{escape_html(e.description)}</h1>\n"
+	return Response(body, status=e.http_status_code, mimetype="text/html")
 
 
 def run_after_request_hooks(request, response):
@@ -441,7 +450,6 @@ if sentry_dsn := os.getenv("FRAPPE_SENTRY_DSN"):
 	from sentry_sdk.integrations.dedupe import DedupeIntegration
 	from sentry_sdk.integrations.excepthook import ExcepthookIntegration
 	from sentry_sdk.integrations.modules import ModulesIntegration
-	from sentry_sdk.integrations.wsgi import SentryWsgiMiddleware
 
 	from frappe.utils.sentry import FrappeIntegration, before_send
 
@@ -460,7 +468,8 @@ if sentry_dsn := os.getenv("FRAPPE_SENTRY_DSN"):
 
 	if tracing_sample_rate := os.getenv("SENTRY_TRACING_SAMPLE_RATE"):
 		kwargs["traces_sample_rate"] = float(tracing_sample_rate)
-		application = SentryWsgiMiddleware(application)
+		# Phase 20: WSGI pipeline removed — wire sentry's ASGI middleware in
+		# frappe/asgi.py if request tracing is ever needed again
 
 	if profiling_sample_rate := os.getenv("SENTRY_PROFILING_SAMPLE_RATE"):
 		kwargs["profiles_sample_rate"] = float(profiling_sample_rate)
@@ -501,11 +510,3 @@ def serve(
 	frappe.asgi.serve(port=port, site=site, sites_path=sites_path, proxy=proxy)
 
 
-def application_with_statics():
-	global application, _sites_path
-
-	application = SharedDataMiddleware(application, {"/assets": str(os.path.join(_sites_path, "assets"))})
-
-	application = StaticDataMiddleware(application, {"/files": str(os.path.abspath(_sites_path))})
-
-	return application

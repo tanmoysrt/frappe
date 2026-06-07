@@ -132,10 +132,7 @@ def _dump_options_header(value, options: dict) -> str:
 		if opt is None:
 			continue
 		opt = str(opt)
-		if key == "filename" and not opt.isascii():
-			parts.append(f"filename*=UTF-8''{quote(opt)}")
-		else:
-			parts.append(f'{key}="{opt}"' if _OPTION_NEEDS_QUOTES.search(opt) else f"{key}={opt}")
+		parts.append(f'{key}="{opt}"' if _OPTION_NEEDS_QUOTES.search(opt) else f"{key}={opt}")
 	return "; ".join(parts)
 
 
@@ -635,7 +632,9 @@ class Request:
 			return
 		self._form, self._files = MultiDict(), MultiDict()
 		mimetype = self.mimetype
-		if self._body_stream is None or self.method not in ("POST", "PUT", "PATCH", "DELETE"):
+		# werkzeug parity: parsing is decided by content type, NOT method —
+		# frappe's test clients send urlencoded bodies on GET (oauth flows)
+		if self._body_stream is None:
 			return
 		self._check_content_length()
 		self._body_stream.seek(0)
@@ -691,6 +690,16 @@ class Request:
 		for key, value in self.form.items(multi=True):
 			combined.add(key, value)
 		return combined
+
+	@property
+	def environ(self):
+		"""Legacy WSGI-shaped view of the request (kept for old tests; the
+		server itself never builds an environ)."""
+		return {
+			"REQUEST_METHOD": self.method,
+			"PATH_INFO": self.path,
+			"QUERY_STRING": self.query_string.decode("latin-1"),
+		}
 
 	def close(self):
 		if self._body_stream is not None:
@@ -773,6 +782,15 @@ class Response:
 	# --- status -------------------------------------------------------------
 
 	@property
+	def status_code(self):
+		return self._status_code
+
+	@status_code.setter
+	def status_code(self, value):
+		# werkzeug parity: coerce — website code assigns strings ("301")
+		self._status_code = int(value)
+
+	@property
 	def status(self):
 		return f"{self.status_code} {HTTP_STATUS_PHRASES.get(self.status_code, 'UNKNOWN')}"
 
@@ -800,6 +818,8 @@ class Response:
 	def set_data(self, value):
 		self._iterable = None
 		self._data = value.encode() if isinstance(value, str) else bytes(value)
+		# werkzeug parity: assigning a body keeps Content-Length current
+		self.headers.set("Content-Length", str(len(self._data)))
 
 	data = property(get_data, set_data)
 
@@ -870,6 +890,20 @@ class Response:
 
 	def delete_cookie(self, key, path="/", domain=None):
 		self.set_cookie(key, "", expires=datetime(1970, 1, 1, tzinfo=UTC), path=path, domain=domain)
+
+	def __call__(self, environ, start_response):
+		"""Minimal WSGI compatibility — only the legacy werkzeug test-client
+		path uses this (until Phase 20.6 swaps it for httpx/ASGI). The real
+		server path is asgi.py sending this object natively."""
+		if self.file_path:
+			with open(self.file_path, "rb") as f:
+				body = f.read()
+		else:
+			body = self.get_data()
+		if "Content-Length" not in self.headers:
+			self.headers.set("Content-Length", str(len(body)))
+		start_response(self.status, self.headers.items())
+		return [body]
 
 	def __repr__(self):
 		return f"<Response {self.status}>"
