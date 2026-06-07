@@ -1,6 +1,6 @@
 import json
 
-from werkzeug.routing import Rule
+from frappe.http import Rule
 
 import frappe
 from frappe import _

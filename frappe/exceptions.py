@@ -2,7 +2,7 @@
 # License: MIT. See LICENSE
 
 # BEWARE don't put anything in this file except exceptions
-from werkzeug.exceptions import NotFound
+from frappe.http import NotFound
 
 
 class SiteNotSpecifiedError(Exception):

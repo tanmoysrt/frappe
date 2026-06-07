@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 import rq
 import sentry_sdk
 from sentry_sdk.integrations import Integration
-from sentry_sdk.integrations.wsgi import _make_wsgi_event_processor
 from sentry_sdk.tracing import SOURCE_FOR_STYLE
 from sentry_sdk.tracing_utils import record_sql_queries
 from sentry_sdk.utils import capture_internal_exceptions, event_from_exception
@@ -110,8 +109,15 @@ def capture_exception(message: str | None = None) -> None:
 			):
 				set_scope(scope)
 			if frappe.request:
-				evt_processor = _make_wsgi_event_processor(frappe.request.environ, False)
-				scope.add_event_processor(evt_processor)
+				# Phase 20: no WSGI environ — attach the request facts directly
+				scope.set_context(
+					"Request",
+					{
+						"method": frappe.request.method,
+						"url": frappe.request.url,
+						"headers": dict(frappe.request.headers),
+					},
+				)
 				if frappe.request.is_json:
 					scope.set_context("JSON Body", frappe.request.json)
 				elif frappe.request.form:

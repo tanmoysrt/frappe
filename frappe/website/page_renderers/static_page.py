@@ -2,8 +2,7 @@ import mimetypes
 import os
 from pathlib import Path
 
-from werkzeug.wrappers import Response
-from werkzeug.wsgi import wrap_file
+from frappe.http import send_file
 
 import frappe
 from frappe.website.page_renderers.base_renderer import BaseRenderer
@@ -55,8 +54,7 @@ class StaticPage(BaseRenderer):
 		return True
 
 	def render(self):
-		# file descriptor to be left open, closed by middleware
-		f = open(self.file_path, "rb")
-		response = Response(wrap_file(frappe.local.request.environ, f), direct_passthrough=True)
+		# native file response: streamed by asgi.py via aiofiles (Range/304)
+		response = send_file(self.file_path)
 		response.mimetype = mimetypes.guess_type(self.file_path)[0] or "application/octet-stream"
 		return response

@@ -7,7 +7,7 @@ import re
 from functools import lru_cache, wraps
 
 import yaml
-from werkzeug.wrappers import Response
+from frappe.http import Response
 
 import frappe
 from frappe.apps import get_apps, get_default_path, is_desk_apps

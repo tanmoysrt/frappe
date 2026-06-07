@@ -5,7 +5,7 @@ import time
 from collections.abc import Callable
 from functools import wraps
 
-from werkzeug.wrappers import Response
+from frappe.http import Response
 
 import frappe
 from frappe import _

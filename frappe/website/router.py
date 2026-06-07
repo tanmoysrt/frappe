@@ -4,8 +4,7 @@
 import os
 import re
 
-from werkzeug.exceptions import NotFound
-from werkzeug.routing import Map, Rule
+from frappe.http import Map, NotFound, Rule
 
 import frappe
 from frappe.website.utils import extract_title, get_frontmatter
@@ -61,15 +60,14 @@ def get_page_info_from_web_form(path):
 def evaluate_dynamic_routes(rules, path):
 	"""
 	Use Werkzeug routing to evaluate dynamic routes like /project/<name>
-	https://werkzeug.palletsprojects.com/en/1.0.x/routing/
+	(rule syntax mirrors werkzeug routing: /route/<name>, <path:name>)
 	"""
 	route_map = Map(rules)
 	endpoint = None
 
-	if hasattr(frappe.local, "request") and frappe.local.request.environ:
-		urls = route_map.bind_to_environ(frappe.local.request.environ)
+	if hasattr(frappe.local, "request") and frappe.local.request:
 		try:
-			endpoint, args = urls.match("/" + path)
+			endpoint, args = route_map.match("/" + path)
 			if args:
 				# don't cache when there's a query string!
 				frappe.local.no_cache = 1

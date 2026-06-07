@@ -4,7 +4,7 @@ import base64
 import binascii
 from urllib.parse import quote, unquote, urlencode, urlparse
 
-from werkzeug.wrappers import Response
+from frappe.http import Response
 
 import frappe
 import frappe.database

@@ -15,16 +15,17 @@ from urllib.parse import quote
 from uuid import UUID
 
 import orjson
-import werkzeug.utils
-from werkzeug.exceptions import Forbidden, NotFound
-from werkzeug.local import LocalProxy
-from werkzeug.wrappers import Response
+
 
 import frappe
 import frappe.model.document
 import frappe.sessions
 import frappe.utils
 from frappe import _
+from frappe.http import Forbidden, NotFound, Response
+from frappe.http import redirect as _redirect
+from frappe.http import send_file
+from frappe.utils.local import LocalProxy
 from frappe.core.doctype.access_log.access_log import make_access_log
 from frappe.core.doctype.file.utils import check_path_safety
 from frappe.utils import format_timedelta, orjson_dumps
@@ -269,7 +270,7 @@ def as_page():
 
 
 def redirect():
-	return werkzeug.utils.redirect(frappe.response.location)
+	return _redirect(frappe.response.location)
 
 
 def download_backup(path):
@@ -332,9 +333,8 @@ def send_private_file(path: str, filename: str | None = None) -> Response:
 		if not os.path.exists(filepath):
 			raise NotFound
 
-		response = werkzeug.utils.send_file(
+		response = send_file(
 			filepath,
-			environ=frappe.local.request.environ,
 			conditional=True,
 			as_attachment=as_attachment,
 			download_name=filename,

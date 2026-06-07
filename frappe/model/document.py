@@ -11,7 +11,7 @@ from functools import cached_property, wraps
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Self, TypeAlias, Union, overload, override
 
-from werkzeug.exceptions import NotFound
+from frappe.http import NotFound
 
 import frappe
 from frappe import _, is_whitelisted, msgprint

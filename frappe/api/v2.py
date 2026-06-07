@@ -11,7 +11,7 @@ Note:
 import json
 from typing import Any
 
-from werkzeug.routing import Rule
+from frappe.http import Rule
 
 import frappe
 import frappe.client

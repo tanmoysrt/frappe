@@ -6,8 +6,8 @@ from urllib.parse import quote, urlencode, urlparse
 from oauthlib.oauth2 import FatalClientError, OAuth2Error
 from oauthlib.openid.connect.core.endpoints.pre_configured import Server as WebApplicationServer
 from pydantic import ValidationError
-from werkzeug import Response
-from werkzeug.exceptions import NotFound
+from frappe.http import Response
+from frappe.http import NotFound
 
 import frappe
 import frappe.utils

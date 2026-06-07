@@ -1,8 +1,7 @@
 import re
 
 import click
-import werkzeug.routing.exceptions
-from werkzeug.routing import Rule
+from frappe.http import RequestRedirect, Rule
 
 import frappe
 from frappe.website.page_renderers.document_page import DocumentPage
@@ -49,7 +48,7 @@ class PathResolver:
 		else:
 			try:
 				endpoint = resolve_path(self.path)
-			except werkzeug.routing.exceptions.RequestRedirect as e:
+			except RequestRedirect as e:
 				frappe.flags.redirect_location = e.new_url
 				return frappe.flags.redirect_location, RedirectPage(e.new_url, e.code)
 

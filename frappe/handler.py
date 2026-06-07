@@ -6,7 +6,7 @@ from mimetypes import guess_type
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from werkzeug.wrappers import Response
+from frappe.http import Response
 
 import frappe
 import frappe.sessions

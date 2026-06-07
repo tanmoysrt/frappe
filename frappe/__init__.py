@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, Optional, TypeAlias, Union
 
 import orjson
-from werkzeug.datastructures import Headers
+from frappe.http import Headers
 
 import frappe
 from frappe.query_builder.utils import (
@@ -55,7 +55,7 @@ __title__ = "Frappe Framework"
 if TYPE_CHECKING:  # pragma: no cover
 	from logging import Logger
 
-	from werkzeug.wrappers import Request
+	from frappe.http import Request
 
 	from frappe.database.mariadb.database import MariaDBDatabase as PyMariaDBDatabase
 	from frappe.database.mariadb.mysqlclient import MariaDBDatabase

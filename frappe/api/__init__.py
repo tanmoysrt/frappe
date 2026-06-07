@@ -3,9 +3,7 @@
 from contextlib import suppress
 from enum import Enum
 
-from werkzeug.exceptions import NotFound
-from werkzeug.routing import Map, Submount
-from werkzeug.wrappers import Request, Response
+from frappe.http import Map, NotFound, Request, Response, Submount
 
 import frappe
 from frappe import _
@@ -57,7 +55,7 @@ def handle(request: Request):
 		doc.deferred_insert()
 
 	try:
-		endpoint, arguments = API_URL_MAP.bind_to_environ(request.environ).match()
+		endpoint, arguments = API_URL_MAP.match(request.path, request.method)
 	except NotFound:  # Wrap 404 - backward compatiblity
 		raise frappe.DoesNotExistError
 

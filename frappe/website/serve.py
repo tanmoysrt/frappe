@@ -1,4 +1,4 @@
-from werkzeug.wrappers import Response
+from frappe.http import Response
 
 import frappe
 from frappe.permissions import handle_does_not_exist_error
