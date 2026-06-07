@@ -72,13 +72,17 @@ async def _lifespan(scope, receive, send):
 			frappe.dispatch.register_loop_thread()
 			# SQLite queue workers (Phase 9): asyncio tasks on this loop,
 			# idle-cheap when no site uses queue_backend "sqlite"
-			from frappe.utils import sqlite_queue
+			from frappe.utils import scheduler, sqlite_queue
 
 			await sqlite_queue.start_workers()
+			# in-process scheduler tick (Phase 11); cross-process FileLock +
+			# `in_process_scheduler: 0` config flip keep `bench schedule` viable
+			scheduler.start_scheduler_task()
 			await send({"type": "lifespan.startup.complete"})
 		elif message["type"] == "lifespan.shutdown":
-			from frappe.utils import sqlite_queue
+			from frappe.utils import scheduler, sqlite_queue
 
+			await scheduler.stop_scheduler_task()
 			await sqlite_queue.stop_workers()
 			# close per-site DB pools (Phase 6); they live on the bridge
 			# loop, so go through a pool thread -> run_coroutine_sync

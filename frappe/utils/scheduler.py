@@ -91,6 +91,89 @@ def sleep_duration(tick):
 	return (next_execution - now).total_seconds()
 
 
+# --- in-process scheduler (Phase 11) -----------------------------------------
+#
+# Same tick loop as start_scheduler, as an asyncio task on the main event
+# loop (started at ASGI lifespan startup) — no separate scheduler process in
+# light mode. Everything that matters is shared with the process scheduler:
+# tick interval + wall-clock alignment (sleep_duration), the cross-process
+# FileLock (an external `bench schedule` and the in-process task can never
+# both run), per-site iteration/enqueue and the scheduler_disabled flags
+# (enqueue_events_for_all_sites, unchanged). Config flip reverts:
+# `in_process_scheduler: 0` in common config + run `bench schedule` as today.
+
+_task_state = {"task": None, "lock": None}
+
+
+def in_process_scheduler_enabled() -> bool:
+	return cint(frappe.get_conf().get("in_process_scheduler", 1)) == 1
+
+
+def start_scheduler_task() -> None:
+	"""Create the scheduler tick task on the running loop (lifespan startup)."""
+	import asyncio
+
+	_task_state["task"] = asyncio.create_task(_scheduler_loop(), name="frappe-scheduler")
+
+
+async def stop_scheduler_task() -> None:
+	import asyncio
+
+	if task := _task_state["task"]:
+		task.cancel()
+		import contextlib
+
+		with contextlib.suppress(asyncio.CancelledError):
+			await task
+	_task_state["task"] = None
+
+
+async def _scheduler_loop():
+	import asyncio
+
+	from asgiref.sync import sync_to_async
+
+	from frappe.database.aio import run_in_clean_context
+
+	def _setup():
+		# sync setup in a pool thread, clean context: config read + the same
+		# cross-process FileLock start_scheduler takes. thread_local=False —
+		# acquired here, released from whatever thread runs the finally.
+		# No set_niceness: that would renice the whole web process.
+		if not in_process_scheduler_enabled():
+			return None, None
+		lock = FileLock(_get_scheduler_lock_file(), thread_local=False)
+		try:
+			lock.acquire(blocking=False)
+		except Timeout:
+			frappe.logger("scheduler").info(
+				"scheduler lock held (external bench schedule?) — in-process scheduler not started"
+			)
+			return None, None
+		return lock, get_scheduler_tick()
+
+	lock, tick = await run_in_clean_context(sync_to_async(_setup, thread_sensitive=False)())
+	if lock is None:
+		return
+	_task_state["lock"] = lock
+
+	try:
+		while True:
+			await asyncio.sleep(sleep_duration(tick))
+			try:
+				# heavy sync work (per-site init/connect/enqueue/destroy) on the
+				# pool, in a fresh contextvars Context per tick — never on the
+				# loop thread, never sharing the lifespan context's frappe.local
+				await run_in_clean_context(
+					sync_to_async(enqueue_events_for_all_sites, thread_sensitive=False)()
+				)
+			except Exception:
+				frappe.logger("scheduler").error("in-process scheduler tick failed", exc_info=True)
+	finally:
+		lock.release()
+		_task_state["lock"] = None
+
+
 def enqueue_events_for_all_sites() -> None:
 	"""Loop through sites and enqueue events that are not already queued"""
 
