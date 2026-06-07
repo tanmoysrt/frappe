@@ -19,10 +19,14 @@ Env toggles (same as frappe.app.serve): NO_STATICS, USE_PROXY.
 
 import asyncio
 import io
+import mimetypes
 import os
 import sys
+from email.utils import formatdate, parsedate_to_datetime
+from pathlib import Path
 from tempfile import TemporaryFile
 
+import aiofiles
 from aiofiles.threadpool import wrap as _aio_wrap
 from asgiref.sync import sync_to_async
 
@@ -35,6 +39,10 @@ _SPOOL_MAX = 1024 * 1024
 
 _DONE = object()
 
+# native static serving (Phase 20.2)
+_STATIC_CHUNK = 256 * 1024
+_STATIC_MAX_AGE = 60 * 60 * 12  # werkzeug SharedDataMiddleware default
+
 
 def _build_wsgi_app():
 	"""Build the same WSGI stack frappe.app.serve() builds, once at import."""
@@ -46,9 +54,9 @@ def _build_wsgi_app():
 			frappe.app.application, sort_by=("cumtime", "calls"), restrictions=(200,)
 		)
 	app = frappe.app.application
-	if not os.environ.get("NO_STATICS"):
-		# mutates frappe.app.application: SharedData(/assets) + StaticData(/files)
-		app = frappe.app.application_with_statics()
+	# statics (/assets + public /files) are served natively by _serve_static
+	# (Phase 20.2) — the werkzeug SharedData/StaticData middlewares are no
+	# longer wrapped in (application_with_statics remains for rollback)
 	if os.environ.get("USE_PROXY"):
 		from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -59,6 +67,152 @@ def _build_wsgi_app():
 _wsgi_app = _build_wsgi_app()
 
 
+def _scope_header(scope, name: bytes) -> str | None:
+	for key, value in scope["headers"]:
+		if key == name:
+			return value.decode("latin-1")
+	return None
+
+
+def _static_file_for(scope) -> Path | None:
+	"""Map /assets and public /files URLs to disk, with traversal guard.
+	Returns None for paths this handler doesn't own (fall through to app)."""
+	path = scope["path"]
+	sites_path = os.environ.get("SITES_PATH", ".")
+	if path.startswith("/assets/"):
+		base = Path(sites_path, "assets").resolve()
+		rest = path[len("/assets/") :]
+	elif path.startswith("/files/"):
+		# same resolution as the old StaticDataMiddleware loader:
+		# <sites>/<site from bound site or Host>/public/files/<rest>
+		from frappe.utils import get_site_name
+
+		site = get_site_name(frappe.app._site or _scope_header(scope, b"host") or "")
+		base = Path(sites_path, site, "public", "files").resolve()
+		rest = path[len("/files/") :]
+	else:
+		return None
+	if "\x00" in rest:
+		return None
+	full = (base / rest).resolve()
+	if not full.is_relative_to(base):  # ../ traversal
+		return None
+	return full
+
+
+def _parse_range(header: str, size: int) -> tuple[int, int] | None:
+	"""Single byte-range only (curl -r / video seeking). None = ignore/416."""
+	if not header.startswith("bytes=") or "," in header:
+		return None
+	start_s, _, end_s = header[6:].partition("-")
+	try:
+		if start_s:
+			start = int(start_s)
+			end = min(int(end_s), size - 1) if end_s else size - 1
+		else:  # suffix range: last N bytes
+			start = max(size - int(end_s), 0)
+			end = size - 1
+	except ValueError:
+		return None
+	if start > end or start >= size:
+		return None
+	return start, end
+
+
+async def _serve_static(scope, send) -> bool:
+	"""Serve /assets and public /files straight from the loop: stat + aiofiles
+	streaming, ETag/Last-Modified 304s, single-range 206s. Returns False when
+	the request isn't a static hit (app handles it). Private files stay on the
+	app path (permission checks)."""
+	if scope["method"] not in ("GET", "HEAD"):
+		return False
+	full = _static_file_for(scope)
+	if full is None:
+		return False
+	try:
+		stat = await sync_to_async(os.stat, thread_sensitive=False)(full)
+	except OSError:
+		return False
+	if not os.path.isfile(full):  # cheap after stat warmed the dentry cache
+		return False
+
+	size = stat.st_size
+	mtime = int(stat.st_mtime)
+	etag = f'"frappe-{mtime}-{size}"'
+	last_modified = formatdate(mtime, usegmt=True)
+	headers = [
+		(b"content-type", (mimetypes.guess_type(str(full))[0] or "application/octet-stream").encode()),
+		(b"accept-ranges", b"bytes"),
+		(b"etag", etag.encode()),
+		(b"last-modified", last_modified.encode()),
+		(b"cache-control", f"public, max-age={_STATIC_MAX_AGE}".encode()),
+	]
+
+	# force-download for risky extensions on /files (old patch_start_response)
+	if scope["path"].startswith("/files/"):
+		from urllib.parse import quote
+
+		from frappe.utils.response import FORCE_DOWNLOAD_EXTENSIONS
+
+		if scope["path"].lower().endswith(FORCE_DOWNLOAD_EXTENSIONS):
+			headers.append(
+				(b"content-disposition", f"attachment; filename*=UTF-8''{quote(full.name)}".encode())
+			)
+
+	# conditional GET -> 304 (ETag wins over If-Modified-Since, like werkzeug)
+	if_none_match = _scope_header(scope, b"if-none-match")
+	if_modified_since = _scope_header(scope, b"if-modified-since")
+	not_modified = False
+	if if_none_match:
+		not_modified = etag in {tag.strip() for tag in if_none_match.split(",")}
+	elif if_modified_since:
+		try:
+			not_modified = int(parsedate_to_datetime(if_modified_since).timestamp()) >= mtime
+		except (TypeError, ValueError):
+			pass
+	if not_modified:
+		await send({"type": "http.response.start", "status": 304, "headers": headers})
+		await send({"type": "http.response.body", "body": b""})
+		return True
+
+	start, length, status = 0, size, 200
+	if range_header := _scope_header(scope, b"range"):
+		byte_range = _parse_range(range_header, size)
+		if byte_range is None:
+			await send(
+				{
+					"type": "http.response.start",
+					"status": 416,
+					"headers": [(b"content-range", f"bytes */{size}".encode())],
+				}
+			)
+			await send({"type": "http.response.body", "body": b""})
+			return True
+		start, end = byte_range
+		length, status = end - start + 1, 206
+		headers.append((b"content-range", f"bytes {start}-{end}/{size}".encode()))
+
+	headers.append((b"content-length", str(length).encode()))
+	await send({"type": "http.response.start", "status": status, "headers": headers})
+	if scope["method"] == "HEAD":
+		await send({"type": "http.response.body", "body": b""})
+		return True
+
+	async with aiofiles.open(full, "rb") as f:
+		if start:
+			await f.seek(start)
+		remaining = length
+		while remaining > 0:
+			chunk = await f.read(min(_STATIC_CHUNK, remaining))
+			if not chunk:
+				break
+			remaining -= len(chunk)
+			await send({"type": "http.response.body", "body": chunk, "more_body": remaining > 0})
+		if remaining > 0:  # file truncated mid-stream; terminate cleanly
+			await send({"type": "http.response.body", "body": b"", "more_body": False})
+	return True
+
+
 async def application(scope, receive, send):
 	# socket.io (Phase 13): /socket.io long-polling + websocket, same loop.
 	# Lazy import keeps the HTTP path bootable without python-socketio.
@@ -67,6 +221,11 @@ async def application(scope, receive, send):
 
 		await realtime_server.application(scope, receive, send)
 	elif scope["type"] == "http":
+		# native /assets + public /files (Phase 20.2): aiofiles streaming,
+		# no environ build, no pool hop for the common cache-hit (304) case.
+		# Misses fall through to the app (website routes, proper 404 page).
+		if not os.environ.get("NO_STATICS") and await _serve_static(scope, send):
+			return
 		await _handle_http(scope, receive, send)
 	elif scope["type"] == "lifespan":
 		await _lifespan(scope, receive, send)
