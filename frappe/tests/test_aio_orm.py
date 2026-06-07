@@ -21,6 +21,78 @@ async def sample_orm_read():
 	return {"name": doc.name, "users": count}
 
 
+class TestAioWritePath(AsyncIntegrationTestCase):
+	"""Phase 16: await doc.aio.insert()/save()/delete() + async controller
+	hooks dispatched from the sync ORM core."""
+
+	async def test_insert_save_delete(self):
+		doc = await frappe.aio.new_doc("ToDo")
+		doc.description = "phase16 aio write"
+		await doc.aio.insert()
+		self.assertTrue(doc.name)
+		name = doc.name
+		self.assertEqual(await frappe.aio.get_value("ToDo", name, "description"), "phase16 aio write")
+
+		doc.description = "phase16 updated"
+		await doc.aio.save()
+		self.assertEqual(await frappe.aio.get_value("ToDo", name, "description"), "phase16 updated")
+
+		await doc.aio.delete()
+		self.assertIsNone(await frappe.aio.get_value("ToDo", name, "description"))
+
+	async def test_gather_writes_serialized(self):
+		docs = []
+		for i in range(4):
+			d = await frappe.aio.new_doc("ToDo")
+			d.description = f"phase16 gather {i}"
+			docs.append(d)
+		await asyncio.gather(*(d.aio.insert() for d in docs))
+		names = [d.name for d in docs]
+		self.assertEqual(len(set(names)), 4)
+		await asyncio.gather(*(d.aio.delete() for d in docs))
+
+	async def test_async_controller_hook_under_doc_aio(self):
+		"""THE deadlock case: doc.aio.insert holds the per-Database lock,
+		the async validate hook awaits frappe.db.aio from another pool
+		thread — dispatch_hook must release the lock for the duration."""
+		seen = {}
+
+		async def hook():
+			seen["users"] = await frappe.db.aio.count("User")
+
+		doc = await frappe.aio.new_doc("ToDo")
+		doc.description = "phase16 async hook"
+		doc.before_insert = hook
+		await asyncio.wait_for(doc.aio.insert(), timeout=30)
+		self.assertGreaterEqual(seen["users"], 2)
+		await doc.aio.delete()
+
+
+class TestAsyncControllerSyncPath(IntegrationTestCase):
+	"""Async controller methods also work on the plain sync ORM path
+	(pool-thread requests, CLI) — dispatch_sync bridges them."""
+
+	def test_async_controller_hook(self):
+		seen = {}
+
+		async def hook():
+			seen["users"] = await frappe.db.aio.count("User")
+
+		doc = frappe.new_doc("ToDo")
+		doc.description = "phase16 sync path async hook"
+		doc.before_insert = hook
+		doc.insert()
+		self.assertGreaterEqual(seen["users"], 2)
+		doc.delete()
+
+	def test_sync_controller_unchanged(self):
+		doc = frappe.new_doc("ToDo")
+		doc.description = "phase16 sync controller"
+		doc.insert()  # ToDo's own sync controller hooks run as always
+		self.assertTrue(doc.name)
+		doc.delete()
+
+
 class TestAioWhitelisted(IntegrationTestCase):
 	"""execute_cmd -> dispatch_sync: the production request path shape."""
 

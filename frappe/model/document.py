@@ -19,6 +19,7 @@ from frappe.core.doctype.file.utils import relink_mismatched_files
 from frappe.core.doctype.server_script.server_script_utils import run_server_script_for_doc_event
 from frappe.database.utils import commit_after_response
 from frappe.desk.form.document_follow import follow_document
+from frappe.dispatch import dispatch_hook, is_async_callable
 from frappe.integrations.doctype.webhook import run_webhooks
 from frappe.model import optional_fields, table_fields
 from frappe.model.base_document import BaseDocument, D, get_controller
@@ -425,6 +426,16 @@ class Document(BaseDocument):
 
 	_DOCTYPE_NAME: ClassVar[str | None] = None
 	docs: "DocsCollection[Self]" = DocsCollection()
+
+	@property
+	def aio(self):
+		"""Awaitable view of this document: ``await doc.aio.save()``,
+		``insert()``, ``delete()``, ``submit()``, ... — any method, run on
+		the worker pool with the caller's request context, serialized on the
+		same per-Database lock as ``frappe.db.aio`` (Phase 16)."""
+		from frappe.aio import AsyncDocumentFacade
+
+		return AsyncDocumentFacade(self)
 
 	doctype: DF.Data
 	name: DF.Data | None
@@ -1585,6 +1596,9 @@ class Document(BaseDocument):
 			# Cannot have a field with same name as method
 			# If method found in __dict__, expect it to be callable
 			if method in self.__dict__ or callable(method_object):
+				# async controllers bridge to the loop; sync run inline (Phase 16)
+				if is_async_callable(method_object):
+					return dispatch_hook(method_object, *args, **kwargs)
 				return method_object(*args, **kwargs)
 
 		fn.__name__ = str(method)

@@ -82,6 +82,33 @@ def dispatch_sync(handler, *args, **kwargs):
 	return handler(*args, **kwargs)
 
 
+def dispatch_hook(handler, *args, **kwargs):
+	"""``dispatch_sync`` for ORM hooks (controller methods, doc_events).
+
+	Sync hooks run inline, untouched. Async hooks bridge to the loop — and
+	if the current thread holds the per-Database serialization lock (it does
+	when the ORM call came through ``doc.aio`` / ``frappe.aio``), the lock is
+	released for the duration: the async hook's ``await frappe.db.aio.*``
+	runs on another pool thread and would deadlock on it, while this thread
+	is parked here with its connection idle, so releasing is safe.
+	"""
+	if not is_async_callable(handler):
+		return handler(*args, **kwargs)
+
+	import frappe
+
+	db = getattr(frappe.local, "db", None)
+	lock = db.aio._lock if db is not None else None
+	held = lock is not None and lock.held_by_current_thread()
+	if held:
+		lock.release()
+	try:
+		return dispatch_sync(handler, *args, **kwargs)
+	finally:
+		if held:
+			lock.acquire()
+
+
 # --- sync→async bridge for loop-bound clients (Phase 3+) ---------------------
 #
 # async_to_sync with no loop around runs each call in a brand-new one-shot
@@ -149,6 +176,4 @@ def run_coroutine_sync(coro):
 		return asyncio.run_coroutine_threadsafe(coro, get_bridge_loop()).result()
 
 	coro.close()
-	raise RuntimeError(
-		"run_coroutine_sync called from an event loop thread - await the async API instead."
-	)
+	raise RuntimeError("run_coroutine_sync called from an event loop thread - await the async API instead.")

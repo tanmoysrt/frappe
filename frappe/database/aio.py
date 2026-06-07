@@ -118,6 +118,41 @@ class BridgedConnection:
 		return getattr(self._aconn, name)
 
 
+class OwnedLock:
+	"""``threading.Lock`` + owner-thread tracking.
+
+	The per-Database serialization lock is held across whole ORM calls
+	(``doc.aio.save()``). When such a call dispatches an *async* controller
+	hook, the holder thread parks in ``async_to_sync`` while the hook awaits
+	``frappe.db.aio.*`` from another pool thread — on a plain Lock that
+	deadlocks. Owner tracking lets ``dispatch_hook`` detect "current thread
+	holds it", release for the duration (the holder's connection is idle
+	while parked), and reacquire after.
+	"""
+
+	def __init__(self):
+		self._lock = threading.Lock()
+		self.owner = None
+
+	def acquire(self):
+		self._lock.acquire()
+		self.owner = threading.get_ident()
+
+	def release(self):
+		self.owner = None
+		self._lock.release()
+
+	def held_by_current_thread(self) -> bool:
+		return self.owner == threading.get_ident()
+
+	def __enter__(self):
+		self.acquire()
+		return self
+
+	def __exit__(self, *exc):
+		self.release()
+
+
 class AsyncDatabaseFacade:
 	"""Awaitable view of a Database: ``await frappe.db.aio.get_value(...)``.
 
@@ -137,7 +172,7 @@ class AsyncDatabaseFacade:
 	def __init__(self, db):
 		self._db = db
 		self._wrappers = {}
-		self._lock = threading.Lock()
+		self._lock = OwnedLock()
 
 	def __getattr__(self, name):
 		if wrapper := self._wrappers.get(name):
