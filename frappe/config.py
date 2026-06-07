@@ -1,6 +1,7 @@
 import importlib
 import os
 import traceback
+from contextlib import contextmanager
 from typing import Any
 
 import click
@@ -9,6 +10,33 @@ import frappe
 from frappe import _dict, get_file_json
 from frappe.exceptions import IncorrectSitePath
 from frappe.utils.caching import site_cache
+
+# Architecture-level options (Phase 19): these choose the process shape
+# (async DB driver, queue backend, realtime mode, serve knobs) — a bench
+# runs ONE process shape, so they live ONLY in common_site_config.json and
+# are never site-overridable. Read them with `frappe.get_common_conf`.
+ARCHITECTURE_KEYS = (
+	"use_async_db",
+	"queue_backend",
+	"use_node_realtime",
+	"socketio_port",
+	"db_pool_size",
+	"db_pool_recycle",
+	"db_pool_idle_timeout",
+	"db_pool_acquire_timeout",
+	"in_process_scheduler",
+	"cache_backend",
+	"sqlite_engine",
+	"asgi_pool_size",
+	"asgi_limit_concurrency",
+	"asgi_thread_stack",
+	"malloc_trim_interval",
+	"use_tcmalloc",
+	"webserver_port",
+)
+
+# pinned by patch_common_conf during tests; checked first by get_common_conf
+_common_conf_overrides: dict[str, Any] | None = None
 
 
 def get_site_config(
@@ -42,7 +70,9 @@ def _get_site_config(sites_path: str, site_path: str) -> _dict[str, Any]:
 		site_config = os.path.join(site_path, "site_config.json")
 		if os.path.exists(site_config):
 			try:
-				config.update(get_file_json(site_config))
+				site_overrides = get_file_json(site_config)
+				config.update(site_overrides)
+				_warn_site_architecture_keys(site_path, site_overrides)
 			except Exception as error:
 				click.secho(f"{frappe.local.site}/site_config.json is invalid", fg="red")
 				print(error)
@@ -110,6 +140,23 @@ def _get_site_config(sites_path: str, site_path: str) -> _dict[str, Any]:
 	return config
 
 
+_warned_arch_key_sites: set[str] = set()
+
+
+def _warn_site_architecture_keys(site_path: str, site_overrides: dict) -> None:
+	"""Architecture keys in a site_config.json are IGNORED since Phase 19
+	(their readers use `get_common_conf`); warn once per site per process."""
+	stale = [key for key in ARCHITECTURE_KEYS if key in site_overrides]
+	if stale and site_path not in _warned_arch_key_sites:
+		_warned_arch_key_sites.add(site_path)
+		click.secho(
+			f"Warning: architecture keys {stale} in {site_path}/site_config.json are "
+			"ignored — set them in common_site_config.json instead",
+			fg="yellow",
+			err=True,
+		)
+
+
 def get_common_site_config(sites_path: str | None = None, cached=False) -> _dict[str, Any]:
 	"""Return common site config as dictionary.
 
@@ -145,6 +192,37 @@ _cached_get_common_site_config = site_cache(ttl=60, maxsize=16)(_get_common_site
 def clear_site_config_cache():
 	_cached_get_common_site_config.clear_cache()
 	_cached_get_site_config.clear_cache()
+
+
+def get_common_conf(key: str, default: Any = None) -> Any:
+	"""Read an architecture-level option from common_site_config.json ONLY.
+
+	Unlike ``frappe.conf`` (common merged with site config, site winning),
+	this never consults the site config — architecture knobs (see
+	``ARCHITECTURE_KEYS``) choose the process shape and must not vary per
+	site. Works without site init (uses cwd as sites_path fallback) and is
+	cached per process (60s TTL via the cached common-config reader).
+	"""
+	if _common_conf_overrides is not None and key in _common_conf_overrides:
+		return _common_conf_overrides[key]
+	value = get_common_site_config(cached=True).get(key)
+	return default if value is None else value
+
+
+@contextmanager
+def patch_common_conf(**overrides):
+	"""Pin architecture knobs for a test block without touching the
+	bench-global common_site_config.json (mirror of `change_settings`).
+
+	with patch_common_conf(queue_backend="rq"): ...
+	"""
+	global _common_conf_overrides
+	previous = _common_conf_overrides
+	_common_conf_overrides = {**(previous or {}), **overrides}
+	try:
+		yield
+	finally:
+		_common_conf_overrides = previous
 
 
 def get_conf(site: str | None = None) -> _dict[str, Any]:

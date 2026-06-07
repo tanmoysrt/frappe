@@ -1563,7 +1563,7 @@ from frappe.utils.messages import *  # noqa: I001
 
 import frappe._optimizations
 from frappe.cache_manager import clear_cache, reset_metadata_version
-from frappe.config import get_common_site_config, get_conf, get_site_config
+from frappe.config import get_common_conf, get_common_site_config, get_conf, get_site_config
 from frappe.core.doctype.system_settings.system_settings import get_system_settings
 from frappe.model.document import (
 	get_doc,
