@@ -78,7 +78,8 @@ def _gil_env_decision(conf):
 	"""
 	if not _is_free_threaded_build():
 		return None
-	return "0" if (_flag(conf, "free_threading") and _flag(conf, "use_async_db")) else "1"
+	# use_async_db defaults on (Phase 28); free_threading is the opt-in here
+	return "0" if (_flag(conf, "free_threading") and _flag(conf, "use_async_db", 1)) else "1"
 
 
 def _reexec():

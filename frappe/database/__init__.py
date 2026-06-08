@@ -60,13 +60,23 @@ def drop_user_and_database(db_name, db_user):
 		return frappe.database.postgres.setup_db.drop_user_and_database(db_name, db_user)
 
 
+def async_db_enabled() -> bool:
+	"""Async DB driver is the default (Phase 28). Set ``use_async_db: 0`` in
+	common_site_config.json for the sync rollback. Single source of the default
+	so the get_db branches and the lifespan preload can't drift."""
+	import frappe
+	from frappe.utils import cint
+
+	return cint(frappe.get_common_conf("use_async_db", 1)) == 1
+
+
 def get_db(socket=None, host=None, user=None, password=None, port=None, cur_db_name=None):
 	import frappe
 
 	conf = frappe.local.conf
 
 	if conf.db_type == "postgres":
-		if frappe.get_common_conf("use_async_db"):
+		if async_db_enabled():
 			import frappe.database.postgres.aio
 
 			return frappe.database.postgres.aio.AsyncPostgresDatabase(
@@ -79,7 +89,7 @@ def get_db(socket=None, host=None, user=None, password=None, port=None, cur_db_n
 			socket, host, user, password, port, cur_db_name
 		)
 	elif conf.db_type == "sqlite":
-		if frappe.get_common_conf("use_async_db"):
+		if async_db_enabled():
 			import frappe.database.sqlite.aio
 
 			return frappe.database.sqlite.aio.AsyncSQLiteDatabase(cur_db_name=cur_db_name)
@@ -87,7 +97,7 @@ def get_db(socket=None, host=None, user=None, password=None, port=None, cur_db_n
 		import frappe.database.sqlite.database
 
 		return frappe.database.sqlite.database.SQLiteDatabase(cur_db_name=cur_db_name)
-	elif frappe.get_common_conf("use_async_db"):
+	elif async_db_enabled():
 		import frappe.database.mariadb.aio
 
 		return frappe.database.mariadb.aio.AsyncMariaDBDatabase(

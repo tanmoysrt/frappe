@@ -42,8 +42,10 @@ def preload_configured_backends() -> list[str]:
 		warm("rq", "redis")
 
 	# DB driver: only the one this bench's db_type + async flag selects
+	from frappe.database import async_db_enabled
+
 	db_type = conf("db_type")
-	use_async = conf("use_async_db")
+	use_async = async_db_enabled()
 	if db_type == "mariadb":
 		if use_async:
 			warm("aiomysql", "pymysql")
