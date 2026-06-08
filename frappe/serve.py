@@ -162,13 +162,9 @@ def serve(port=None, site=None, sites_path=".", proxy=False):
 	default_pool = cpu if gil_disabled else 2 * cpu
 	# Phase 24.10 lean default: the smallest backend set (sqlite main DB +
 	# in-process cache + sqlite queue) has no external I/O to overlap, so a
-	# CPU-sized pool is just wasted thread stacks — cap it small.
-	lean = (
-		conf.get("db_type") == "sqlite"
-		and conf.get("cache_backend") in (None, "", "memory")
-		and conf.get("queue_backend") in (None, "", "sqlite")
-	)
-	if lean:
+	# CPU-sized pool is just wasted thread stacks — cap it small. Same predicate
+	# _reexec uses to pick the glibc allocator, so the two can't drift.
+	if _lean_backends(conf):
 		default_pool = min(default_pool, 4)
 
 	pool_size = knob("asgi_pool_size", default_pool)
