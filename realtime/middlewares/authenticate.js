@@ -58,6 +58,8 @@ function authenticate_with_frappe(socket, next) {
 		if (secret) {
 			headers["X-Frappe-Socket-Secret"] = secret;
 		}
+		// Carry the tenant so loopback requests route to the right site.
+		headers["X-Frappe-Site-Name"] = get_site_name(socket);
 		return fetch(get_url(socket, path), {
 			...opts,
 			headers,
